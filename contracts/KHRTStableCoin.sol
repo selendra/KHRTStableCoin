@@ -9,26 +9,24 @@ import "./interface/RoleController.sol";
 
 /**
  * @title KHRTStableCoin
- * @dev A secure ERC20 stablecoin with external role management
+ * @dev A secure ERC20 stablecoin with governance-based role management
  * Features:
- * - External role-based access control via RoleController
- * - Pausable transfers
+ * - Governance-controlled role-based access control via RoleController
+ * - Emergency pause (emergency admin only)
  * - Maximum supply protection
  * - Blacklist functionality
- * - Emergency controls
- * - Role controller upgradeability
+ * - Role controller upgradeability (governance controlled)
  */
 contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
     IRoleController public roleController;
-    address public admin; // Fallback admin for emergency situations
+    address public immutable emergencyAdmin; // Only for local emergency pause/unpause
     
     uint256 public maxSupply;
 
     // Security features
     mapping(address => bool) public blacklisted;
 
-    // Emergency controls
-    bool public emergencyPause;
+    // Emergency controls (simplified)
     bool public roleControllerLocked;
 
     // Events
@@ -37,8 +35,7 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
     event BlacklistUpdated(address indexed account, bool status);
     event MaxSupplyUpdated(uint256 oldMaxSupply, uint256 newMaxSupply);
     event RoleControllerUpdated(address indexed oldController, address indexed newController);
-    event EmergencyPauseToggled(bool status, address indexed admin);
-    event RoleControllerLocked(address indexed admin);
+    event RoleControllerLocked(address indexed caller);
     
     // Custom errors
     error ExceedsMaxSupply(uint256 requested, uint256 available);
@@ -47,32 +44,34 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
     error InvalidAddress();
     error UnauthorizedAccess(address caller, bytes32 role);
     error RoleControllerNotSet();
-    error EmergencyPauseActive();
     error RoleControllerIsLocked();
+    error OnlyEmergencyAdmin();
+    error OnlyGovernance();
 
     modifier hasRole(bytes32 role) {
         if (address(roleController) == address(0)) {
-            // Fallback: only admin can perform actions if role controller not set
-            if (msg.sender != admin) {
-                revert RoleControllerNotSet();
-            }
-        } else {
-            if (!roleController.checkRole(role, msg.sender)) {
-                revert UnauthorizedAccess(msg.sender, role);
-            }
+            revert RoleControllerNotSet();
+        }
+        if (!roleController.checkRole(role, msg.sender)) {
+            revert UnauthorizedAccess(msg.sender, role);
         }
         _;
     }
 
-    modifier onlyAdmin() {
-        if (address(roleController) != address(0)) {
-            if (!roleController.checkRole(roleController.DEFAULT_ADMIN_ROLE(), msg.sender)) {
-                revert UnauthorizedAccess(msg.sender, roleController.DEFAULT_ADMIN_ROLE());
-            }
-        } else {
-            if (msg.sender != admin) {
-                revert UnauthorizedAccess(msg.sender, bytes32(0));
-            }
+    modifier onlyGovernance() {
+        if (address(roleController) == address(0)) {
+            revert RoleControllerNotSet();
+        }
+        (, address governanceContract) = roleController.getGovernanceStatus();
+        if (msg.sender != governanceContract) {
+            revert OnlyGovernance();
+        }
+        _;
+    }
+
+    modifier onlyEmergencyAdmin() {
+        if (msg.sender != emergencyAdmin) {
+            revert OnlyEmergencyAdmin();
         }
         _;
     }
@@ -99,36 +98,37 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
     }
 
     modifier whenNotEmergencyPaused() {
-        if (emergencyPause) {
-            revert EmergencyPauseActive();
+        // Check both local pause and role controller emergency mode
+        if (address(roleController) != address(0) && roleController.isEmergencyMode()) {
+            revert("Emergency mode active");
         }
         _;
     }
 
     constructor(
         uint256 _maxSupply,
-        address _admin,
+        address _emergencyAdmin,
         address _roleController
     ) ERC20("KHR Token (Official)", "KHRT") {
         require(_maxSupply > 0, "Max supply must be greater than 0");
-        require(_admin != address(0), "Invalid admin address");
+        require(_emergencyAdmin != address(0), "Invalid emergency admin address");
         
         maxSupply = _maxSupply;
-        admin = _admin;
+        emergencyAdmin = _emergencyAdmin;
         
-        // Set role controller (can be zero initially)
+        // Set role controller (required for governance-controlled operations)
         if (_roleController != address(0)) {
             roleController = IRoleController(_roleController);
         }
     }
 
     /**
-     * @dev Set or update the role controller
+     * @dev Set or update the role controller (governance only)
      * @param newRoleController Address of the new role controller
      */
     function setRoleController(address newRoleController) 
         external 
-        onlyAdmin 
+        onlyGovernance
         validAddress(newRoleController)
     {
         if (roleControllerLocked) {
@@ -142,41 +142,27 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
     }
 
     /**
-     * @dev Lock the role controller to prevent further changes
+     * @dev Lock the role controller to prevent further changes (governance only)
      * This is irreversible and should only be done when the system is stable
      */
-    function lockRoleController() external onlyAdmin {
+    function lockRoleController() external onlyGovernance {
         roleControllerLocked = true;
         emit RoleControllerLocked(msg.sender);
     }
 
     /**
-     * @dev Emergency pause function that doesn't require role controller
-     * Can be called by admin or emergency admin
+     * @dev Emergency pause function (emergency admin only)
+     * This is separate from the role controller's emergency mode
      */
-    function toggleEmergencyPause(bool status) external {
-        bool isAuthorized = false;
-        
-        // Check if caller is admin
-        if (msg.sender == admin) {
-            isAuthorized = true;
-        }
-        
-        // Check if caller has emergency admin role in role controller
-        if (address(roleController) != address(0)) {
-            try roleController.checkRole(roleController.PAUSER_ROLE(), msg.sender) returns (bool hasPauserRole) {
-                if (hasPauserRole) {
-                    isAuthorized = true;
-                }
-            } catch {
-                // If role controller fails, only admin can proceed
-            }
-        }
-        
-        require(isAuthorized, "Not authorized for emergency pause");
-        
-        emergencyPause = status;
-        emit EmergencyPauseToggled(status, msg.sender);
+    function pause() external onlyEmergencyAdmin {
+        _pause();
+    }
+
+    /**
+     * @dev Emergency unpause function (emergency admin only)
+     */
+    function unpause() external onlyEmergencyAdmin {
+        _unpause();
     }
 
     /**
@@ -194,11 +180,6 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
         whenNotPaused
         whenNotEmergencyPaused
     {
-        // Check if role controller is in emergency mode
-        if (address(roleController) != address(0) && roleController.isEmergencyMode()) {
-            revert EmergencyPauseActive();
-        }
-
         // Check max supply
         if (totalSupply() + amount > maxSupply) {
             revert ExceedsMaxSupply(amount, maxSupply - totalSupply());
@@ -289,44 +270,18 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
     }
 
     /**
-     * @dev Update maximum supply
+     * @dev Update maximum supply (governance only)
      * @param newMaxSupply New maximum supply
      */
     function updateMaxSupply(uint256 newMaxSupply) 
         external 
-        onlyAdmin
+        onlyGovernance
         whenNotEmergencyPaused
     {
         require(newMaxSupply >= totalSupply(), "New max supply below current supply");
         uint256 oldMaxSupply = maxSupply;
         maxSupply = newMaxSupply;
         emit MaxSupplyUpdated(oldMaxSupply, newMaxSupply);
-    }
-    
-    /**
-     * @dev Pause all token transfers
-     */
-    function pause() external hasRole(roleController.PAUSER_ROLE()) {
-        _pause();
-    }
-    
-    /**
-     * @dev Unpause all token transfers
-     */
-    function unpause() external hasRole(roleController.PAUSER_ROLE()) {
-        _unpause();
-    }
-
-    /**
-     * @dev Update the fallback admin (only current admin)
-     * @param newAdmin Address of the new admin
-     */
-    function updateAdmin(address newAdmin) 
-        external 
-        validAddress(newAdmin)
-    {
-        require(msg.sender == admin, "Only current admin");
-        admin = newAdmin;
     }
 
     /**
@@ -338,9 +293,9 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
         address to,
         uint256 value
     ) internal override(ERC20, ERC20Pausable) {
-        // Check emergency pause
-        if (emergencyPause) {
-            revert EmergencyPauseActive();
+        // Check emergency mode from role controller
+        if (address(roleController) != address(0) && roleController.isEmergencyMode()) {
+            revert("Emergency mode active");
         }
         
         // Check blacklist for transfers (not for minting/burning)
@@ -353,6 +308,8 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
         // Call parent implementations
         super._update(from, to, value);
     }
+
+    // ====== VIEW FUNCTIONS ======
 
     /**
      * @dev Get role controller status
@@ -368,5 +325,53 @@ contract KHRTStableCoin is ERC20, ReentrancyGuard, ERC20Pausable {
         controller = address(roleController);
         isSet = controller != address(0);
         isLocked = roleControllerLocked;
+    }
+
+    /**
+     * @dev Get emergency admin address
+     * @return Address of the emergency admin
+     */
+    function getEmergencyAdmin() external view returns (address) {
+        return emergencyAdmin;
+    }
+
+    /**
+     * @dev Check if emergency mode is active (from role controller)
+     * @return True if emergency mode is active
+     */
+    function isEmergencyMode() external view returns (bool) {
+        if (address(roleController) != address(0)) {
+            return roleController.isEmergencyMode();
+        }
+        return false;
+    }
+
+    /**
+     * @dev Get governance contract address
+     * @return Address of the governance contract (from role controller)
+     */
+    function getGovernanceContract() external view returns (address) {
+        if (address(roleController) != address(0)) {
+            (, address governanceContract) = roleController.getGovernanceStatus();
+            return governanceContract;
+        }
+        return address(0);
+    }
+
+    /**
+     * @dev Check if an address has a specific role
+     * @param role Role to check
+     * @param account Account to check
+     * @return True if account has the role
+     */
+    function hasRoleView(bytes32 role, address account) external view returns (bool) {
+        if (address(roleController) == address(0)) {
+            return false;
+        }
+        try roleController.checkRole(role, account) returns (bool result) {
+            return result;
+        } catch {
+            return false;
+        }
     }
 }
