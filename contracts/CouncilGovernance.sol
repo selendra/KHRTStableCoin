@@ -2,870 +2,453 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interface/IRoleController.sol";
 
 /**
  * @title CouncilGovernance
- * @dev Democratic governance contract with elected council members
+ * @dev Decentralized governance contract for managing stablecoin ecosystem
  * Features:
- * - Council member elections with term limits
- * - Proposal and voting system
- * - Quorum requirements for valid decisions
- * - Time-locked execution for security
- * - Emergency council override mechanisms
+ * - Multi-signature council governance (no single admin)
+ * - Time-locked proposal execution
+ * - Flexible voting thresholds
+ * - Council membership management through voting
  * - Integration with RoleController for role management
- * - Fixed stack depth issues
  */
-contract CouncilGovernance is ReentrancyGuard {
-    IRoleController public roleController;
-    IERC20 public governanceToken; // Token used for voting power
+contract CouncilGovernance is ReentrancyGuard, Pausable {
     
-    // Council configuration
-    uint256 public constant MAX_COUNCIL_SIZE = 7;
-    uint256 public constant MIN_COUNCIL_SIZE = 3;
-    uint256 public constant COUNCIL_TERM_LENGTH = 365 days; // 1 year terms
-    uint256 public constant ELECTION_PERIOD = 7 days;
-    uint256 public constant PROPOSAL_VOTING_PERIOD = 3 days;
-    uint256 public constant EXECUTION_DELAY = 2 days; // Time lock
-    uint256 public constant QUORUM_PERCENTAGE = 60; // 60% of council must vote
-    
-    // Council member structure
-    struct CouncilMember {
-        address memberAddress;
-        uint256 termStart;
-        uint256 termEnd;
+    struct Council {
         bool isActive;
-        uint256 votesReceived; // For election tracking
-        string name; // Optional identifier
-        string contactInfo; // Optional contact information
+        uint256 votingPower;
+        uint256 joinedAt;
     }
     
-    // Proposal structure
-    struct Proposal {
-        uint256 id;
+    struct ProposalCore {
         address proposer;
-        string title;
-        string description;
-        ProposalType proposalType;
-        bytes executionData; // Encoded function call data
-        address targetContract; // Contract to call
-        uint256 value; // ETH value to send
-        uint256 votesFor;
-        uint256 votesAgainst;
-        uint256 votesAbstain;
-        uint256 createdAt;
-        uint256 votingEndsAt;
-        uint256 executionTime; // When proposal can be executed
-        ProposalStatus status;
-        mapping(address => bool) hasVoted;
-        mapping(address => VoteChoice) votes;
+        uint8 proposalType; // 0=role, 1=member_add, 2=member_remove, 3=execution
+        uint8 state; // 0=pending, 1=active, 2=defeated, 3=succeeded, 4=executed
+        uint32 deadline;
+        uint32 executeTime;
     }
     
-    // Election structure
-    struct Election {
-        uint256 electionId;
-        uint256 startTime;
-        uint256 endTime;
-        uint256 availableSeats;
-        bool isActive;
-        mapping(address => uint256) candidateVotes;
-        mapping(address => bool) hasVoted;
-        address[] candidates;
+    struct ProposalVotes {
+        uint128 forVotes;
+        uint128 againstVotes;
     }
     
-    // NEW: Parameter structs to avoid stack depth issues
-    struct ProposalParams {
-        string title;
-        string description;
-        ProposalType proposalType;
-        bytes executionData;
-        address targetContract;
-        uint256 value;
-    }
-    
-    struct RoleProposalParams {
+    struct ProposalAction {
+        address target;
         bytes32 role;
-        address account;
-        string reason;
         bool isGrant;
     }
     
-    enum ProposalType {
-        RoleGranting,    // Grant role to address
-        RoleRevoking,    // Revoke role from address
-        ConfigChange,    // Change governance configuration
-        EmergencyAction, // Emergency governance action
-        CouncilRemoval,  // Remove council member
-        ContractUpgrade, // Upgrade contract functionality
-        TreasuryAction   // Treasury management
-    }
+    // ====== STATE VARIABLES ======
     
-    enum ProposalStatus {
-        Active,
-        Executed,
-        Cancelled,
-        Failed,
-        Expired
-    }
+    IRoleController public roleController;
     
-    enum VoteChoice {
-        None,
-        For,
-        Against,
-        Abstain
-    }
+    // Council management
+    mapping(address => Council) public councils;
+    address[] public councilList;
+    uint256 public totalVotingPower;
+    uint256 public activeMembers;
     
-    // State variables
-    CouncilMember[] public councilMembers;
-    mapping(address => bool) public isCouncilMember;
-    mapping(address => uint256) public councilMemberIndex;
+    // Proposal management (split to avoid stack issues)
+    mapping(uint256 => ProposalCore) public proposalCore;
+    mapping(uint256 => ProposalVotes) public proposalVotes;
+    mapping(uint256 => ProposalAction) public proposalActions;
+    mapping(uint256 => bytes) public proposalData;
+    mapping(uint256 => string) public proposalDescriptions;
     
-    uint256 public currentElectionId;
-    mapping(uint256 => Election) public elections;
+    // Voting tracking
+    mapping(uint256 => mapping(address => bool)) public hasVoted;
+    mapping(uint256 => mapping(address => bool)) public voteChoice; // true=for, false=against
     
-    uint256 public proposalCounter;
-    mapping(uint256 => Proposal) public proposals;
+    uint256 public nextProposalId;
     
-    // Candidate registration
-    mapping(address => bool) public isRegisteredCandidate;
-    mapping(address => string) public candidateProfiles;
-    uint256 public candidateRegistrationFee = 1000 * 10**18; // 1000 tokens
+    // Configuration
+    uint256 public votingPeriod = 3 days;
+    uint256 public timeLock = 1 days;
+    uint256 public quorumPercent = 60; // 60%
+    uint256 public majorityPercent = 51; // 51%
     
-    // Treasury
-    uint256 public treasuryBalance;
+    // Constants
+    uint256 public constant MIN_COUNCIL = 3;
+    uint256 public constant MAX_COUNCIL = 15;
+    uint256 public constant BASIS_POINTS = 100;
     
-    // Events
-    event CouncilMemberElected(address indexed member, uint256 indexed termStart, uint256 indexed termEnd);
-    event CouncilMemberTermEnded(address indexed member, uint256 indexed termEnd);
-    event CouncilMemberRemoved(address indexed member, string reason);
+    // ====== EVENTS ======
     
-    event ElectionStarted(uint256 indexed electionId, uint256 startTime, uint256 endTime, uint256 availableSeats);
-    event ElectionEnded(uint256 indexed electionId, address[] winners);
-    event CandidateRegistered(address indexed candidate, string profile);
-    event VoteCast(uint256 indexed electionId, address indexed voter, address indexed candidate, uint256 votingPower);
+    event ProposalCreated(uint256 indexed id, address indexed proposer, uint8 proposalType);
+    event VoteCast(uint256 indexed id, address indexed voter, bool support, uint256 power);
+    event ProposalExecuted(uint256 indexed id, bool success);
+    event CouncilAdded(address indexed member, uint256 power);
+    event CouncilRemoved(address indexed member);
+    event ConfigUpdated(uint256 votingPeriod, uint256 timeLock, uint256 quorum);
     
-    event ProposalCreated(
-        uint256 indexed proposalId,
-        address indexed proposer,
-        string title,
-        ProposalType proposalType,
-        uint256 votingEndsAt
-    );
-    event ProposalVoteCast(
-        uint256 indexed proposalId,
-        address indexed voter,
-        VoteChoice choice,
-        uint256 votingPower
-    );
-    event ProposalExecuted(uint256 indexed proposalId, bool success);
-    event ProposalCancelled(uint256 indexed proposalId, string reason);
+    // ====== ERRORS ======
     
-    event QuorumChanged(uint256 oldQuorum, uint256 newQuorum);
-    event GovernanceTokenUpdated(address indexed oldToken, address indexed newToken);
-    
-    // Errors
-    error NotCouncilMember();
+    error NotCouncil();
     error InvalidProposal();
-    error VotingPeriodEnded();
-    error VotingPeriodActive();
     error AlreadyVoted();
-    error QuorumNotMet();
-    error ExecutionDelayNotMet();
-    error ProposalNotPassed();
-    error InvalidElection();
-    error ElectionNotActive();
-    error AlreadyRegistered();
-    error InsufficientFee();
-    error InvalidCouncilSize();
-    error TermNotExpired();
-    error InvalidAddress();
-    error Unauthorized();
+    error VotingEnded();
+    error NotReady();
+    error AlreadyExecuted();
+    error InsufficientQuorum();
+    error ExecutionFailed();
+    error InvalidMember();
+    error InvalidConfig();
     
-    modifier onlyCouncilMember() {
-        if (!isCouncilMember[msg.sender]) {
-            revert NotCouncilMember();
-        }
+    // ====== MODIFIERS ======
+    
+    modifier onlyCouncil() {
+        if (!councils[msg.sender].isActive) revert NotCouncil();
         _;
     }
     
-    modifier validAddress(address addr) {
-        if (addr == address(0)) {
-            revert InvalidAddress();
-        }
+    modifier validProposal(uint256 id) {
+        if (id >= nextProposalId) revert InvalidProposal();
         _;
     }
+    
+    // ====== CONSTRUCTOR ======
     
     constructor(
         address _roleController,
-        address _governanceToken,
-        address[] memory _initialCouncil,
-        string[] memory _initialCouncilNames
+        address[] memory _members,
+        uint256[] memory _powers
     ) {
-        _validateConstructorParams(_roleController, _governanceToken, _initialCouncil, _initialCouncilNames);
-        _initializeContracts(_roleController, _governanceToken);
-        _initializeCouncil(_initialCouncil, _initialCouncilNames);
-    }
-    
-    // ====== CONSTRUCTOR HELPERS (FIXED FOR STACK DEPTH) ======
-    
-    function _validateConstructorParams(
-        address _roleController,
-        address _governanceToken,
-        address[] memory _initialCouncil,
-        string[] memory _initialCouncilNames
-    ) internal pure {
-        require(_roleController != address(0), "Invalid role controller");
-        require(_governanceToken != address(0), "Invalid governance token");
-        require(_initialCouncil.length >= MIN_COUNCIL_SIZE, "Council too small");
-        require(_initialCouncil.length <= MAX_COUNCIL_SIZE, "Council too large");
-        require(_initialCouncil.length == _initialCouncilNames.length, "Length mismatch");
-    }
-    
-    function _initializeContracts(address _roleController, address _governanceToken) internal {
+        require(_roleController != address(0), "Invalid controller");
+        require(_members.length >= MIN_COUNCIL, "Too few members");
+        require(_members.length == _powers.length, "Length mismatch");
+        
         roleController = IRoleController(_roleController);
-        governanceToken = IERC20(_governanceToken);
-    }
-    
-    function _initializeCouncil(
-        address[] memory _initialCouncil,
-        string[] memory _initialCouncilNames
-    ) internal {
-        for (uint256 i = 0; i < _initialCouncil.length; i++) {
-            _addCouncilMember(_initialCouncil[i], _initialCouncilNames[i]);
+        
+        for (uint256 i = 0; i < _members.length; i++) {
+            _addCouncilInternal(_members[i], _powers[i]);
         }
-    }
-    
-    function _addCouncilMember(address memberAddr, string memory name) internal {
-        require(memberAddr != address(0), "Invalid council member");
-        
-        uint256 termStart = block.timestamp;
-        uint256 termEnd = block.timestamp + COUNCIL_TERM_LENGTH;
-        
-        councilMembers.push(CouncilMember({
-            memberAddress: memberAddr,
-            termStart: termStart,
-            termEnd: termEnd,
-            isActive: true,
-            votesReceived: 0,
-            name: name,
-            contactInfo: ""
-        }));
-        
-        isCouncilMember[memberAddr] = true;
-        councilMemberIndex[memberAddr] = councilMembers.length - 1;
-        
-        emit CouncilMemberElected(memberAddr, termStart, termEnd);
     }
     
     // ====== COUNCIL MANAGEMENT ======
     
-    /**
-     * @dev Register as a candidate for council election
-     * @param profile Brief profile/manifesto of the candidate
-     */
-    function registerCandidate(string calldata profile) external payable {
-        if (isRegisteredCandidate[msg.sender]) {
-            revert AlreadyRegistered();
-        }
-        if (governanceToken.balanceOf(msg.sender) < candidateRegistrationFee) {
-            revert InsufficientFee();
-        }
+    function _addCouncilInternal(address member, uint256 power) internal {
+        require(member != address(0), "Invalid address");
+        require(power > 0, "Invalid power");
+        require(!councils[member].isActive, "Already member");
+        require(activeMembers < MAX_COUNCIL, "Too many members");
         
-        // Transfer registration fee to treasury
-        governanceToken.transferFrom(msg.sender, address(this), candidateRegistrationFee);
-        treasuryBalance += candidateRegistrationFee;
+        councils[member] = Council({
+            isActive: true,
+            votingPower: power,
+            joinedAt: block.timestamp
+        });
         
-        isRegisteredCandidate[msg.sender] = true;
-        candidateProfiles[msg.sender] = profile;
+        councilList.push(member);
+        totalVotingPower += power;
+        activeMembers++;
         
-        emit CandidateRegistered(msg.sender, profile);
+        emit CouncilAdded(member, power);
     }
     
-    /**
-     * @dev Start a new council election
-     * @param availableSeats Number of council seats up for election
-     */
-    function startElection(uint256 availableSeats) external onlyCouncilMember {
-        _validateElectionStart(availableSeats);
-        _createNewElection(availableSeats);
-    }
-    
-    function _validateElectionStart(uint256 availableSeats) internal pure {
-        require(availableSeats > 0 && availableSeats <= MAX_COUNCIL_SIZE, "Invalid seat count");
-    }
-    
-    function _createNewElection(uint256 availableSeats) internal {
-        currentElectionId++;
+    function _removeCouncilInternal(address member) internal {
+        require(councils[member].isActive, "Not member");
+        require(activeMembers > MIN_COUNCIL, "Below minimum");
         
-        Election storage election = elections[currentElectionId];
-        election.electionId = currentElectionId;
-        election.startTime = block.timestamp;
-        election.endTime = block.timestamp + ELECTION_PERIOD;
-        election.availableSeats = availableSeats;
-        election.isActive = true;
+        uint256 power = councils[member].votingPower;
+        councils[member].isActive = false;
+        totalVotingPower -= power;
+        activeMembers--;
         
-        emit ElectionStarted(currentElectionId, election.startTime, election.endTime, availableSeats);
-    }
-    
-    /**
-     * @dev Vote in council election (FIXED FOR STACK DEPTH)
-     * @param electionId ID of the election
-     * @param candidate Address of the candidate to vote for
-     */
-    function voteInElection(uint256 electionId, address candidate) external nonReentrant {
-        _validateElectionVote(electionId, candidate);
-        _recordElectionVote(electionId, candidate);
-    }
-    
-    function _validateElectionVote(uint256 electionId, address candidate) internal view {
-        Election storage election = elections[electionId];
-        
-        if (!election.isActive || block.timestamp > election.endTime) {
-            revert ElectionNotActive();
-        }
-        if (election.hasVoted[msg.sender]) {
-            revert AlreadyVoted();
-        }
-        if (!isRegisteredCandidate[candidate]) {
-            revert InvalidAddress();
-        }
-    }
-    
-    function _recordElectionVote(uint256 electionId, address candidate) internal {
-        Election storage election = elections[electionId];
-        uint256 votingPower = governanceToken.balanceOf(msg.sender);
-        require(votingPower > 0, "No voting power");
-        
-        election.hasVoted[msg.sender] = true;
-        election.candidateVotes[candidate] += votingPower;
-        
-        _addCandidateIfNew(electionId, candidate);
-        
-        emit VoteCast(electionId, msg.sender, candidate, votingPower);
-    }
-    
-    function _addCandidateIfNew(uint256 electionId, address candidate) internal {
-        Election storage election = elections[electionId];
-        
-        // Check if candidate already exists
-        for (uint256 i = 0; i < election.candidates.length; i++) {
-            if (election.candidates[i] == candidate) {
-                return; // Candidate already exists
+        // Remove from list
+        for (uint256 i = 0; i < councilList.length; i++) {
+            if (councilList[i] == member) {
+                councilList[i] = councilList[councilList.length - 1];
+                councilList.pop();
+                break;
             }
         }
         
-        // Add new candidate
-        election.candidates.push(candidate);
+        emit CouncilRemoved(member);
     }
     
-    /**
-     * @dev Finalize election and update council (FIXED FOR STACK DEPTH)
-     * @param electionId ID of the election to finalize
-     */
-    function finalizeElection(uint256 electionId) external onlyCouncilMember nonReentrant {
-        _validateElectionForFinalization(electionId);
-        _processElectionResults(electionId);
-    }
+    // ====== PROPOSAL CREATION ======
     
-    function _validateElectionForFinalization(uint256 electionId) internal {
-        Election storage election = elections[electionId];
-        
-        if (!election.isActive) {
-            revert InvalidElection();
-        }
-        if (block.timestamp <= election.endTime) {
-            revert VotingPeriodActive();
-        }
-        
-        election.isActive = false;
-    }
-    
-    function _processElectionResults(uint256 electionId) internal {
-        Election storage election = elections[electionId];
-        address[] memory winners = _selectElectionWinners(electionId, election.availableSeats);
-        _updateCouncilWithWinners(winners);
-        emit ElectionEnded(electionId, winners);
-    }
-    
-    /**
-     * @dev Remove a council member for misconduct (FIXED FOR STACK DEPTH)
-     * @param member Address of the council member to remove
-     * @param reason Reason for removal
-     * @return proposalId ID of the created removal proposal
-     */
-    function removeCouncilMember(address member, string calldata reason) external onlyCouncilMember returns (uint256) {
-        require(isCouncilMember[member], "Not a council member");
-        return _createRemovalProposal(member, reason);
-    }
-    
-    function _createRemovalProposal(address member, string memory reason) internal returns (uint256) {
-        bytes memory executionData = abi.encodeWithSignature(
-            "_executeCouncilRemoval(address,string)",
-            member,
-            reason
-        );
-        
-        ProposalParams memory params = ProposalParams({
-            title: "Remove Council Member",
-            description: string(abi.encodePacked("Remove ", reason)),
-            proposalType: ProposalType.CouncilRemoval,
-            executionData: executionData,
-            targetContract: address(this),
-            value: 0
-        });
-        
-        return _createProposal(params);
-    }
-    
-    // ====== PROPOSAL SYSTEM (FIXED FOR STACK DEPTH) ======
-    
-    /**
-     * @dev Create a new governance proposal (FIXED SIGNATURE FOR STACK DEPTH)
-     * @param params Proposal parameters struct
-     */
-    function createProposal(ProposalParams calldata params) 
-        external 
-        onlyCouncilMember 
-        returns (uint256) 
-    {
-        return _createProposal(params);
-    }
-    
-    function _createProposal(ProposalParams memory params) internal returns (uint256) {
-        proposalCounter++;
-        uint256 proposalId = proposalCounter;
-        
-        // Initialize proposal in smaller chunks to avoid stack depth
-        _initializeProposalBasic(proposalId, params.title, params.description);
-        _initializeProposalType(proposalId, params.proposalType);
-        _setProposalExecution(proposalId, params.executionData, params.targetContract, params.value);
-        _setProposalTiming(proposalId);
-        
-        emit ProposalCreated(proposalId, msg.sender, params.title, params.proposalType, 
-            block.timestamp + PROPOSAL_VOTING_PERIOD);
-        
-        return proposalId;
-    }
-    
-    function _initializeProposalBasic(
-        uint256 proposalId,
-        string memory title,
-        string memory description
-    ) internal {
-        Proposal storage proposal = proposals[proposalId];
-        proposal.id = proposalId;
-        proposal.proposer = msg.sender;
-        proposal.title = title;
-        proposal.description = description;
-    }
-    
-    function _initializeProposalType(
-        uint256 proposalId,
-        ProposalType proposalType
-    ) internal {
-        proposals[proposalId].proposalType = proposalType;
-        proposals[proposalId].status = ProposalStatus.Active;
-    }
-    
-    function _setProposalExecution(
-        uint256 proposalId,
-        bytes memory executionData,
-        address targetContract,
-        uint256 value
-    ) internal {
-        Proposal storage proposal = proposals[proposalId];
-        proposal.executionData = executionData;
-        proposal.targetContract = targetContract;
-        proposal.value = value;
-    }
-    
-    function _setProposalTiming(uint256 proposalId) internal {
-        Proposal storage proposal = proposals[proposalId];
-        proposal.createdAt = block.timestamp;
-        proposal.votingEndsAt = block.timestamp + PROPOSAL_VOTING_PERIOD;
-        proposal.executionTime = proposal.votingEndsAt + EXECUTION_DELAY;
-    }
-    
-    /**
-     * @dev Vote on a proposal
-     * @param proposalId ID of the proposal
-     * @param choice Vote choice (For, Against, Abstain)
-     */
-    function voteOnProposal(uint256 proposalId, VoteChoice choice) external onlyCouncilMember {
-        _validateVoteOnProposal(proposalId, choice);
-        _recordVote(proposalId, choice);
-    }
-    
-    function _validateVoteOnProposal(uint256 proposalId, VoteChoice choice) internal view {
-        Proposal storage proposal = proposals[proposalId];
-        
-        if (proposal.status != ProposalStatus.Active) {
-            revert InvalidProposal();
-        }
-        if (block.timestamp > proposal.votingEndsAt) {
-            revert VotingPeriodEnded();
-        }
-        if (proposal.hasVoted[msg.sender]) {
-            revert AlreadyVoted();
-        }
-    }
-    
-    function _recordVote(uint256 proposalId, VoteChoice choice) internal {
-        Proposal storage proposal = proposals[proposalId];
-        
-        proposal.hasVoted[msg.sender] = true;
-        proposal.votes[msg.sender] = choice;
-        
-        if (choice == VoteChoice.For) {
-            proposal.votesFor++;
-        } else if (choice == VoteChoice.Against) {
-            proposal.votesAgainst++;
-        } else if (choice == VoteChoice.Abstain) {
-            proposal.votesAbstain++;
-        }
-        
-        emit ProposalVoteCast(proposalId, msg.sender, choice, 1);
-    }
-    
-    /**
-     * @dev Execute a passed proposal (FIXED FOR STACK DEPTH)
-     */
-    function executeProposal(uint256 proposalId) external nonReentrant {
-        // Step 1: Basic validation
-        _validateProposalExists(proposalId);
-        
-        // Step 2: Timing and status validation  
-        _validateProposalTiming(proposalId);
-        
-        // Step 3: Voting validation
-        _validateProposalVotes(proposalId);
-        
-        // Step 4: Execute
-        _executeProposalAction(proposalId);
-    }
-    
-    function _validateProposalExists(uint256 proposalId) internal view {
-        if (proposals[proposalId].status != ProposalStatus.Active) {
-            revert InvalidProposal();
-        }
-    }
-    
-    function _validateProposalTiming(uint256 proposalId) internal view {
-        Proposal storage proposal = proposals[proposalId];
-        if (block.timestamp < proposal.executionTime) {
-            revert ExecutionDelayNotMet();
-        }
-        if (block.timestamp <= proposal.votingEndsAt) {
-            revert VotingPeriodActive();
-        }
-    }
-    
-    function _validateProposalVotes(uint256 proposalId) internal view {
-        Proposal storage proposal = proposals[proposalId];
-        uint256 totalVotes = proposal.votesFor + proposal.votesAgainst + proposal.votesAbstain;
-        uint256 requiredQuorum = (_getActiveCouncilSize() * QUORUM_PERCENTAGE) / 100;
-        
-        if (totalVotes < requiredQuorum) {
-            revert QuorumNotMet();
-        }
-        if (proposal.votesFor <= proposal.votesAgainst) {
-            revert ProposalNotPassed();
-        }
-    }
-    
-    function _executeProposalAction(uint256 proposalId) internal {
-        Proposal storage proposal = proposals[proposalId];
-        proposal.status = ProposalStatus.Executed;
-        
-        bool success = true;
-        if (proposal.targetContract != address(0) && proposal.executionData.length > 0) {
-            (success,) = proposal.targetContract.call{value: proposal.value}(proposal.executionData);
-        }
-        
-        emit ProposalExecuted(proposalId, success);
-    }
-    
-    // ====== ROLE CONTROLLER INTEGRATION (FIXED FOR STACK DEPTH) ======
-    
-    /**
-     * @dev Grant a role through governance proposal (FIXED FOR STACK DEPTH)
-     * @param role Role to grant
-     * @param account Account to grant role to
-     * @param reason Reason for granting the role
-     */
-    function proposeGrantRole(
+    function proposeRoleChange(
         bytes32 role,
         address account,
-        string calldata reason
-    ) external onlyCouncilMember returns (uint256) {
-        return _proposeRoleChange(RoleProposalParams({
+        bool isGrant,
+        string calldata description
+    ) external onlyCouncil whenNotPaused returns (uint256) {
+        require(account != address(0), "Invalid account");
+        
+        uint256 id = nextProposalId++;
+        
+        proposalCore[id] = ProposalCore({
+            proposer: msg.sender,
+            proposalType: 0, // ROLE_CHANGE
+            state: 1, // ACTIVE
+            deadline: uint32(block.timestamp + votingPeriod),
+            executeTime: uint32(block.timestamp + votingPeriod + timeLock)
+        });
+        
+        proposalActions[id] = ProposalAction({
+            target: account,
             role: role,
-            account: account,
-            reason: reason,
+            isGrant: isGrant
+        });
+        
+        proposalDescriptions[id] = description;
+        
+        emit ProposalCreated(id, msg.sender, 0);
+        return id;
+    }
+    
+    function proposeAddMember(
+        address newMember,
+        uint256 power,
+        string calldata description
+    ) external onlyCouncil whenNotPaused returns (uint256) {
+        require(newMember != address(0), "Invalid member");
+        require(!councils[newMember].isActive, "Already member");
+        require(power > 0, "Invalid power");
+        require(activeMembers < MAX_COUNCIL, "Too many members");
+        
+        uint256 id = nextProposalId++;
+        
+        proposalCore[id] = ProposalCore({
+            proposer: msg.sender,
+            proposalType: 1, // MEMBER_ADD
+            state: 1, // ACTIVE
+            deadline: uint32(block.timestamp + votingPeriod),
+            executeTime: uint32(block.timestamp + votingPeriod + timeLock)
+        });
+        
+        proposalActions[id] = ProposalAction({
+            target: newMember,
+            role: bytes32(0),
             isGrant: true
-        }));
-    }
-    
-    /**
-     * @dev Revoke a role through governance proposal (FIXED FOR STACK DEPTH)
-     * @param role Role to revoke
-     * @param account Account to revoke role from
-     * @param reason Reason for revoking the role
-     */
-    function proposeRevokeRole(
-        bytes32 role,
-        address account,
-        string calldata reason
-    ) external onlyCouncilMember returns (uint256) {
-        return _proposeRoleChange(RoleProposalParams({
-            role: role,
-            account: account,
-            reason: reason,
-            isGrant: false
-        }));
-    }
-    
-    function _proposeRoleChange(RoleProposalParams memory params) internal returns (uint256) {
-        string memory action = params.isGrant ? "Grant" : "Revoke";
-        string memory functionSig = params.isGrant ? 
-            "grantRoleWithReason(bytes32,address,string)" : 
-            "revokeRoleWithReason(bytes32,address,string)";
-            
-        bytes memory executionData = abi.encodeWithSignature(
-            functionSig,
-            params.role,
-            params.account,
-            params.reason
-        );
-        
-        ProposalParams memory proposalParams = ProposalParams({
-            title: string(abi.encodePacked(action, " Role")),
-            description: string(abi.encodePacked(action, " role: ", params.reason)),
-            proposalType: params.isGrant ? ProposalType.RoleGranting : ProposalType.RoleRevoking,
-            executionData: executionData,
-            targetContract: address(roleController),
-            value: 0
         });
         
-        return _createProposal(proposalParams);
+        proposalData[id] = abi.encode(power);
+        proposalDescriptions[id] = description;
+        
+        emit ProposalCreated(id, msg.sender, 1);
+        return id;
     }
     
-    // ====== INTERNAL FUNCTIONS ======
-    
-    function _selectElectionWinners(uint256 electionId, uint256 seats) internal view returns (address[] memory) {
-        Election storage election = elections[electionId];
-        address[] memory candidates = election.candidates;
+    function proposeRemoveMember(
+        address member,
+        string calldata description
+    ) external onlyCouncil whenNotPaused returns (uint256) {
+        require(member != address(0), "Invalid member");
+        require(councils[member].isActive, "Not member");
+        require(member != msg.sender, "Cannot remove self");
+        require(activeMembers > MIN_COUNCIL, "Below minimum");
         
-        // Simple sorting by votes (in a production system, use a more efficient algorithm)
-        for (uint256 i = 0; i < candidates.length; i++) {
-            for (uint256 j = i + 1; j < candidates.length; j++) {
-                if (election.candidateVotes[candidates[i]] < election.candidateVotes[candidates[j]]) {
-                    address temp = candidates[i];
-                    candidates[i] = candidates[j];
-                    candidates[j] = temp;
-                }
+        uint256 id = nextProposalId++;
+        
+        proposalCore[id] = ProposalCore({
+            proposer: msg.sender,
+            proposalType: 2, // MEMBER_REMOVE
+            state: 1, // ACTIVE
+            deadline: uint32(block.timestamp + votingPeriod),
+            executeTime: uint32(block.timestamp + votingPeriod + timeLock)
+        });
+        
+        proposalActions[id] = ProposalAction({
+            target: member,
+            role: bytes32(0),
+            isGrant: false
+        });
+        
+        proposalDescriptions[id] = description;
+        
+        emit ProposalCreated(id, msg.sender, 2);
+        return id;
+    }
+    
+    function proposeExecution(
+        address target,
+        bytes calldata data,
+        string calldata description
+    ) external onlyCouncil whenNotPaused returns (uint256) {
+        require(target != address(0), "Invalid target");
+        
+        uint256 id = nextProposalId++;
+        
+        proposalCore[id] = ProposalCore({
+            proposer: msg.sender,
+            proposalType: 3, // EXECUTION
+            state: 1, // ACTIVE
+            deadline: uint32(block.timestamp + votingPeriod),
+            executeTime: uint32(block.timestamp + votingPeriod + timeLock)
+        });
+        
+        proposalActions[id] = ProposalAction({
+            target: target,
+            role: bytes32(0),
+            isGrant: false
+        });
+        
+        proposalData[id] = data;
+        proposalDescriptions[id] = description;
+        
+        emit ProposalCreated(id, msg.sender, 3);
+        return id;
+    }
+    
+    // ====== VOTING ======
+    
+    function vote(uint256 id, bool support) external onlyCouncil validProposal(id) {
+        ProposalCore memory core = proposalCore[id];
+        
+        if (core.state != 1) revert InvalidProposal(); // Must be ACTIVE
+        if (block.timestamp > core.deadline) revert VotingEnded();
+        if (hasVoted[id][msg.sender]) revert AlreadyVoted();
+        
+        hasVoted[id][msg.sender] = true;
+        voteChoice[id][msg.sender] = support;
+        
+        uint256 power = councils[msg.sender].votingPower;
+        
+        if (support) {
+            proposalVotes[id].forVotes += uint128(power);
+        } else {
+            proposalVotes[id].againstVotes += uint128(power);
+        }
+        
+        emit VoteCast(id, msg.sender, support, power);
+        
+        _checkProposalState(id);
+    }
+    
+    function _checkProposalState(uint256 id) internal {
+        ProposalVotes memory votes = proposalVotes[id];
+        uint256 totalVotes = uint256(votes.forVotes) + uint256(votes.againstVotes);
+        uint256 requiredQuorum = (totalVotingPower * quorumPercent) / BASIS_POINTS;
+        
+        if (totalVotes >= requiredQuorum) {
+            if (votes.forVotes > votes.againstVotes) {
+                proposalCore[id].state = 3; // SUCCEEDED
+            } else {
+                proposalCore[id].state = 2; // DEFEATED
             }
         }
+    }
+    
+    function execute(uint256 id) external validProposal(id) nonReentrant {
+        ProposalCore memory core = proposalCore[id];
+        ProposalAction memory action = proposalActions[id];
         
-        uint256 winnersCount = seats > candidates.length ? candidates.length : seats;
-        address[] memory winners = new address[](winnersCount);
+        if (core.state != 3) revert NotReady(); // Must be SUCCEEDED
+        if (block.timestamp < core.executeTime) revert NotReady();
+        if (core.state == 4) revert AlreadyExecuted(); // Already executed
         
-        for (uint256 i = 0; i < winnersCount; i++) {
-            winners[i] = candidates[i];
+        proposalCore[id].state = 4; // EXECUTED
+        
+        bool success;
+        
+        if (core.proposalType == 0) { // ROLE_CHANGE
+            success = _executeRoleChange(action.role, action.target, action.isGrant);
+        } else if (core.proposalType == 1) { // MEMBER_ADD
+            uint256 power = abi.decode(proposalData[id], (uint256));
+            _addCouncilInternal(action.target, power);
+            success = true;
+        } else if (core.proposalType == 2) { // MEMBER_REMOVE
+            _removeCouncilInternal(action.target);
+            success = true;
+        } else if (core.proposalType == 3) { // EXECUTION
+            (success,) = action.target.call(proposalData[id]);
         }
         
-        return winners;
-    }
-    
-    function _updateCouncilWithWinners(address[] memory winners) internal {
-        for (uint256 i = 0; i < winners.length; i++) {
-            _addNewCouncilMember(winners[i]);
-        }
-    }
-    
-    function _addNewCouncilMember(address winner) internal {
-        if (!isCouncilMember[winner]) {
-            uint256 termStart = block.timestamp;
-            uint256 termEnd = block.timestamp + COUNCIL_TERM_LENGTH;
-            
-            councilMembers.push(CouncilMember({
-                memberAddress: winner,
-                termStart: termStart,
-                termEnd: termEnd,
-                isActive: true,
-                votesReceived: 0,
-                name: candidateProfiles[winner],
-                contactInfo: ""
-            }));
-            
-            isCouncilMember[winner] = true;
-            councilMemberIndex[winner] = councilMembers.length - 1;
-            
-            emit CouncilMemberElected(winner, termStart, termEnd);
-        }
-    }
-    
-    function _executeCouncilRemoval(address member, string memory reason) internal {
-        require(isCouncilMember[member], "Not a council member");
+        emit ProposalExecuted(id, success);
         
-        uint256 index = councilMemberIndex[member];
-        councilMembers[index].isActive = false;
-        isCouncilMember[member] = false;
-        
-        emit CouncilMemberRemoved(member, reason);
+        if (!success) revert ExecutionFailed();
     }
     
-    function _getActiveCouncilSize() internal view returns (uint256) {
-        uint256 count = 0;
-        for (uint256 i = 0; i < councilMembers.length; i++) {
-            if (councilMembers[i].isActive && block.timestamp <= councilMembers[i].termEnd) {
-                count++;
+    function _executeRoleChange(bytes32 role, address account, bool isGrant) internal returns (bool) {
+        try roleController.proposeRoleChange(role, account, isGrant) returns (uint256 changeId) {
+            try roleController.executeGovernanceRoleChange(changeId) {
+                return true;
+            } catch {
+                return false;
             }
+        } catch {
+            return false;
         }
-        return count;
     }
     
-    // ====== OPTIMIZED VIEW FUNCTIONS (ALREADY FIXED FOR STACK DEPTH) ======
-    
-    function getCouncilMembers() external view returns (CouncilMember[] memory) {
-        return councilMembers;
-    }
-    
-    function getActiveCouncilMembers() external view returns (address[] memory) {
-        uint256 activeCount = _getActiveCouncilSize();
-        address[] memory activeMembers = new address[](activeCount);
-        uint256 index = 0;
+    function updateConfig(
+        uint256 _votingPeriod,
+        uint256 _timeLock,
+        uint256 _quorumPercent
+    ) external onlyCouncil {
+        require(_votingPeriod >= 1 hours && _votingPeriod <= 30 days, "Invalid voting period");
+        require(_timeLock >= 0 && _timeLock <= 7 days, "Invalid timelock");
+        require(_quorumPercent >= 1 && _quorumPercent <= 100, "Invalid quorum");
         
-        for (uint256 i = 0; i < councilMembers.length; i++) {
-            if (councilMembers[i].isActive && block.timestamp <= councilMembers[i].termEnd) {
-                activeMembers[index] = councilMembers[i].memberAddress;
-                index++;
-            }
-        }
+        votingPeriod = _votingPeriod;
+        timeLock = _timeLock;
+        quorumPercent = _quorumPercent;
         
-        return activeMembers;
+        emit ConfigUpdated(_votingPeriod, _timeLock, _quorumPercent);
     }
     
-    /**
-     * @dev Get basic proposal information (avoids stack too deep)
-     */
-    function getProposalBasicInfo(uint256 proposalId) external view returns (
-        uint256 id,
+    function getProposalState(uint256 id) external view returns (
         address proposer,
-        string memory title,
-        string memory description,
-        ProposalType proposalType,
-        ProposalStatus status
+        uint8 proposalType,
+        uint8 state,
+        uint256 deadline,
+        uint256 executeTime,
+        uint256 forVotes,
+        uint256 againstVotes
     ) {
-        Proposal storage proposal = proposals[proposalId];
-        return (
-            proposal.id,
-            proposal.proposer,
-            proposal.title,
-            proposal.description,
-            proposal.proposalType,
-            proposal.status
-        );
-    }
-    
-    /**
-     * @dev Get proposal voting information (avoids stack too deep)
-     */
-    function getProposalVotingInfo(uint256 proposalId) external view returns (
-        uint256 votesFor,
-        uint256 votesAgainst,
-        uint256 votesAbstain,
-        uint256 createdAt,
-        uint256 votingEndsAt,
-        uint256 executionTime
-    ) {
-        Proposal storage proposal = proposals[proposalId];
-        return (
-            proposal.votesFor,
-            proposal.votesAgainst,
-            proposal.votesAbstain,
-            proposal.createdAt,
-            proposal.votingEndsAt,
-            proposal.executionTime
-        );
-    }
-    
-    /**
-     * @dev Get proposal execution data (avoids stack too deep)
-     */
-    function getProposalExecutionData(uint256 proposalId) external view returns (
-        bytes memory executionData,
-        address targetContract,
-        uint256 value
-    ) {
-        Proposal storage proposal = proposals[proposalId];
-        return (
-            proposal.executionData,
-            proposal.targetContract,
-            proposal.value
-        );
-    }
-    
-    /**
-     * @dev Get election candidates
-     */
-    function getElectionCandidates(uint256 electionId) external view returns (address[] memory) {
-        return elections[electionId].candidates;
-    }
-    
-    /**
-     * @dev Get vote counts for election candidates
-     */
-    function getElectionVotes(uint256 electionId) external view returns (uint256[] memory) {
-        Election storage election = elections[electionId];
-        uint256[] memory votes = new uint256[](election.candidates.length);
+        ProposalCore memory core = proposalCore[id];
+        ProposalVotes memory votes = proposalVotes[id];
         
-        for (uint256 i = 0; i < election.candidates.length; i++) {
-            votes[i] = election.candidateVotes[election.candidates[i]];
-        }
-        
-        return votes;
-    }
-    
-    /**
-     * @dev Get election basic info
-     */
-    function getElectionInfo(uint256 electionId) external view returns (
-        uint256 startTime,
-        uint256 endTime,
-        uint256 availableSeats,
-        bool isActive
-    ) {
-        Election storage election = elections[electionId];
         return (
-            election.startTime,
-            election.endTime,
-            election.availableSeats,
-            election.isActive
+            core.proposer,
+            core.proposalType,
+            core.state,
+            core.deadline,
+            core.executeTime,
+            votes.forVotes,
+            votes.againstVotes
         );
     }
     
-    /**
-     * @dev Get combined election results (replaces old getElectionResults)
-     */
-    function getElectionResults(uint256 electionId) external view returns (
-        address[] memory candidates,
-        uint256[] memory votes
+    function getProposalAction(uint256 id) external view returns (
+        address target,
+        bytes32 role,
+        bool isGrant,
+        string memory description
     ) {
-        candidates = this.getElectionCandidates(electionId);
-        votes = this.getElectionVotes(electionId);
+        ProposalAction memory action = proposalActions[id];
+        return (action.target, action.role, action.isGrant, proposalDescriptions[id]);
     }
     
-    function hasVotedInElection(uint256 electionId, address voter) external view returns (bool) {
-        return elections[electionId].hasVoted[voter];
+    function getCouncilInfo(address member) external view returns (
+        bool isActive,
+        uint256 votingPower,
+        uint256 joinedAt
+    ) {
+        Council memory council = councils[member];
+        return (council.isActive, council.votingPower, council.joinedAt);
     }
     
-    function hasVotedOnProposal(uint256 proposalId, address voter) external view returns (bool) {
-        return proposals[proposalId].hasVoted[voter];
+    function getCouncilList() external view returns (address[] memory) {
+        return councilList;
     }
     
-    function getVoteOnProposal(uint256 proposalId, address voter) external view returns (VoteChoice) {
-        return proposals[proposalId].votes[voter];
+    function hasVotedOn(uint256 id, address voter) external view returns (bool voted, bool choice) {
+        return (hasVoted[id][voter], voteChoice[id][voter]);
+    }
+    
+    function emergencyPause() external {
+        require(councils[msg.sender].isActive, "Only council");
+        _pause();
+    }
+    
+    function emergencyUnpause() external onlyCouncil {
+        _unpause();
     }
 }
