@@ -74,6 +74,23 @@ contract CouncilGovernance is ReentrancyGuard {
         address[] candidates;
     }
     
+    // NEW: Parameter structs to avoid stack depth issues
+    struct ProposalParams {
+        string title;
+        string description;
+        ProposalType proposalType;
+        bytes executionData;
+        address targetContract;
+        uint256 value;
+    }
+    
+    struct RoleProposalParams {
+        bytes32 role;
+        address account;
+        string reason;
+        bool isGrant;
+    }
+    
     enum ProposalType {
         RoleGranting,    // Grant role to address
         RoleRevoking,    // Revoke role from address
@@ -185,34 +202,60 @@ contract CouncilGovernance is ReentrancyGuard {
         address[] memory _initialCouncil,
         string[] memory _initialCouncilNames
     ) {
+        _validateConstructorParams(_roleController, _governanceToken, _initialCouncil, _initialCouncilNames);
+        _initializeContracts(_roleController, _governanceToken);
+        _initializeCouncil(_initialCouncil, _initialCouncilNames);
+    }
+    
+    // ====== CONSTRUCTOR HELPERS (FIXED FOR STACK DEPTH) ======
+    
+    function _validateConstructorParams(
+        address _roleController,
+        address _governanceToken,
+        address[] memory _initialCouncil,
+        string[] memory _initialCouncilNames
+    ) internal pure {
         require(_roleController != address(0), "Invalid role controller");
         require(_governanceToken != address(0), "Invalid governance token");
         require(_initialCouncil.length >= MIN_COUNCIL_SIZE, "Council too small");
         require(_initialCouncil.length <= MAX_COUNCIL_SIZE, "Council too large");
         require(_initialCouncil.length == _initialCouncilNames.length, "Length mismatch");
-        
+    }
+    
+    function _initializeContracts(address _roleController, address _governanceToken) internal {
         roleController = IRoleController(_roleController);
         governanceToken = IERC20(_governanceToken);
-        
-        // Initialize council with founding members
+    }
+    
+    function _initializeCouncil(
+        address[] memory _initialCouncil,
+        string[] memory _initialCouncilNames
+    ) internal {
         for (uint256 i = 0; i < _initialCouncil.length; i++) {
-            require(_initialCouncil[i] != address(0), "Invalid council member");
-            
-            councilMembers.push(CouncilMember({
-                memberAddress: _initialCouncil[i],
-                termStart: block.timestamp,
-                termEnd: block.timestamp + COUNCIL_TERM_LENGTH,
-                isActive: true,
-                votesReceived: 0,
-                name: _initialCouncilNames[i],
-                contactInfo: ""
-            }));
-            
-            isCouncilMember[_initialCouncil[i]] = true;
-            councilMemberIndex[_initialCouncil[i]] = i;
-            
-            emit CouncilMemberElected(_initialCouncil[i], block.timestamp, block.timestamp + COUNCIL_TERM_LENGTH);
+            _addCouncilMember(_initialCouncil[i], _initialCouncilNames[i]);
         }
+    }
+    
+    function _addCouncilMember(address memberAddr, string memory name) internal {
+        require(memberAddr != address(0), "Invalid council member");
+        
+        uint256 termStart = block.timestamp;
+        uint256 termEnd = block.timestamp + COUNCIL_TERM_LENGTH;
+        
+        councilMembers.push(CouncilMember({
+            memberAddress: memberAddr,
+            termStart: termStart,
+            termEnd: termEnd,
+            isActive: true,
+            votesReceived: 0,
+            name: name,
+            contactInfo: ""
+        }));
+        
+        isCouncilMember[memberAddr] = true;
+        councilMemberIndex[memberAddr] = councilMembers.length - 1;
+        
+        emit CouncilMemberElected(memberAddr, termStart, termEnd);
     }
     
     // ====== COUNCIL MANAGEMENT ======
@@ -244,11 +287,18 @@ contract CouncilGovernance is ReentrancyGuard {
      * @param availableSeats Number of council seats up for election
      */
     function startElection(uint256 availableSeats) external onlyCouncilMember {
+        _validateElectionStart(availableSeats);
+        _createNewElection(availableSeats);
+    }
+    
+    function _validateElectionStart(uint256 availableSeats) internal pure {
         require(availableSeats > 0 && availableSeats <= MAX_COUNCIL_SIZE, "Invalid seat count");
-        
+    }
+    
+    function _createNewElection(uint256 availableSeats) internal {
         currentElectionId++;
-        Election storage election = elections[currentElectionId];
         
+        Election storage election = elections[currentElectionId];
         election.electionId = currentElectionId;
         election.startTime = block.timestamp;
         election.endTime = block.timestamp + ELECTION_PERIOD;
@@ -259,11 +309,16 @@ contract CouncilGovernance is ReentrancyGuard {
     }
     
     /**
-     * @dev Vote in council election
+     * @dev Vote in council election (FIXED FOR STACK DEPTH)
      * @param electionId ID of the election
      * @param candidate Address of the candidate to vote for
      */
     function voteInElection(uint256 electionId, address candidate) external nonReentrant {
+        _validateElectionVote(electionId, candidate);
+        _recordElectionVote(electionId, candidate);
+    }
+    
+    function _validateElectionVote(uint256 electionId, address candidate) internal view {
         Election storage election = elections[electionId];
         
         if (!election.isActive || block.timestamp > election.endTime) {
@@ -275,33 +330,45 @@ contract CouncilGovernance is ReentrancyGuard {
         if (!isRegisteredCandidate[candidate]) {
             revert InvalidAddress();
         }
-        
+    }
+    
+    function _recordElectionVote(uint256 electionId, address candidate) internal {
+        Election storage election = elections[electionId];
         uint256 votingPower = governanceToken.balanceOf(msg.sender);
         require(votingPower > 0, "No voting power");
         
         election.hasVoted[msg.sender] = true;
         election.candidateVotes[candidate] += votingPower;
         
-        // Add candidate to candidates array if not already there
-        bool candidateExists = false;
-        for (uint256 i = 0; i < election.candidates.length; i++) {
-            if (election.candidates[i] == candidate) {
-                candidateExists = true;
-                break;
-            }
-        }
-        if (!candidateExists) {
-            election.candidates.push(candidate);
-        }
+        _addCandidateIfNew(electionId, candidate);
         
         emit VoteCast(electionId, msg.sender, candidate, votingPower);
     }
     
+    function _addCandidateIfNew(uint256 electionId, address candidate) internal {
+        Election storage election = elections[electionId];
+        
+        // Check if candidate already exists
+        for (uint256 i = 0; i < election.candidates.length; i++) {
+            if (election.candidates[i] == candidate) {
+                return; // Candidate already exists
+            }
+        }
+        
+        // Add new candidate
+        election.candidates.push(candidate);
+    }
+    
     /**
-     * @dev Finalize election and update council
+     * @dev Finalize election and update council (FIXED FOR STACK DEPTH)
      * @param electionId ID of the election to finalize
      */
     function finalizeElection(uint256 electionId) external onlyCouncilMember nonReentrant {
+        _validateElectionForFinalization(electionId);
+        _processElectionResults(electionId);
+    }
+    
+    function _validateElectionForFinalization(uint256 electionId) internal {
         Election storage election = elections[electionId];
         
         if (!election.isActive) {
@@ -312,111 +379,95 @@ contract CouncilGovernance is ReentrancyGuard {
         }
         
         election.isActive = false;
-        
-        // Sort candidates by votes and select winners
+    }
+    
+    function _processElectionResults(uint256 electionId) internal {
+        Election storage election = elections[electionId];
         address[] memory winners = _selectElectionWinners(electionId, election.availableSeats);
-        
-        // Update council with new members
         _updateCouncilWithWinners(winners);
-        
         emit ElectionEnded(electionId, winners);
     }
     
     /**
-     * @dev Remove a council member for misconduct
+     * @dev Remove a council member for misconduct (FIXED FOR STACK DEPTH)
      * @param member Address of the council member to remove
      * @param reason Reason for removal
      * @return proposalId ID of the created removal proposal
      */
     function removeCouncilMember(address member, string calldata reason) external onlyCouncilMember returns (uint256) {
         require(isCouncilMember[member], "Not a council member");
-        
-        // Create proposal for council member removal
+        return _createRemovalProposal(member, reason);
+    }
+    
+    function _createRemovalProposal(address member, string memory reason) internal returns (uint256) {
         bytes memory executionData = abi.encodeWithSignature(
             "_executeCouncilRemoval(address,string)",
             member,
             reason
         );
         
-        uint256 proposalId = _createProposal(
-            "Remove Council Member",
-            string(abi.encodePacked("Remove ", reason)),
-            ProposalType.CouncilRemoval,
-            executionData,
-            address(this),
-            0
-        );
+        ProposalParams memory params = ProposalParams({
+            title: "Remove Council Member",
+            description: string(abi.encodePacked("Remove ", reason)),
+            proposalType: ProposalType.CouncilRemoval,
+            executionData: executionData,
+            targetContract: address(this),
+            value: 0
+        });
         
-        return proposalId;
+        return _createProposal(params);
     }
     
-    // ====== PROPOSAL SYSTEM ======
+    // ====== PROPOSAL SYSTEM (FIXED FOR STACK DEPTH) ======
     
     /**
-     * @dev Create a new governance proposal
-     * @param title Title of the proposal
-     * @param description Detailed description
-     * @param proposalType Type of proposal
-     * @param executionData Encoded function call data
-     * @param targetContract Contract to execute the proposal on
-     * @param value ETH value to send with the proposal
+     * @dev Create a new governance proposal (FIXED SIGNATURE FOR STACK DEPTH)
+     * @param params Proposal parameters struct
      */
-    function createProposal(
-        string calldata title,
-        string calldata description,
-        ProposalType proposalType,
-        bytes calldata executionData,
-        address targetContract,
-        uint256 value
-    ) external onlyCouncilMember returns (uint256) {
-        return _createProposal(title, description, proposalType, executionData, targetContract, value);
+    function createProposal(ProposalParams calldata params) 
+        external 
+        onlyCouncilMember 
+        returns (uint256) 
+    {
+        return _createProposal(params);
     }
     
-    function _createProposal(
-        string memory title,
-        string memory description,
-        ProposalType proposalType,
-        bytes memory executionData,
-        address targetContract,
-        uint256 value
-    ) internal returns (uint256) {
+    function _createProposal(ProposalParams memory params) internal returns (uint256) {
         proposalCounter++;
         uint256 proposalId = proposalCounter;
         
-        // Initialize proposal in parts to avoid stack depth issues
-        _initializeProposal(proposalId, title, description, proposalType);
-        _setProposalExecution(proposalId, executionData, targetContract, value);
+        // Initialize proposal in smaller chunks to avoid stack depth
+        _initializeProposalBasic(proposalId, params.title, params.description);
+        _initializeProposalType(proposalId, params.proposalType);
+        _setProposalExecution(proposalId, params.executionData, params.targetContract, params.value);
+        _setProposalTiming(proposalId);
         
-        emit ProposalCreated(proposalId, msg.sender, title, proposalType, 
+        emit ProposalCreated(proposalId, msg.sender, params.title, params.proposalType, 
             block.timestamp + PROPOSAL_VOTING_PERIOD);
         
         return proposalId;
     }
     
-    /**
-     * @dev Initialize basic proposal data (helper to avoid stack depth)
-     */
-    function _initializeProposal(
+    function _initializeProposalBasic(
         uint256 proposalId,
         string memory title,
-        string memory description,
-        ProposalType proposalType
+        string memory description
     ) internal {
         Proposal storage proposal = proposals[proposalId];
         proposal.id = proposalId;
         proposal.proposer = msg.sender;
         proposal.title = title;
         proposal.description = description;
-        proposal.proposalType = proposalType;
-        proposal.createdAt = block.timestamp;
-        proposal.votingEndsAt = block.timestamp + PROPOSAL_VOTING_PERIOD;
-        proposal.executionTime = proposal.votingEndsAt + EXECUTION_DELAY;
-        proposal.status = ProposalStatus.Active;
     }
     
-    /**
-     * @dev Set proposal execution parameters (helper to avoid stack depth)
-     */
+    function _initializeProposalType(
+        uint256 proposalId,
+        ProposalType proposalType
+    ) internal {
+        proposals[proposalId].proposalType = proposalType;
+        proposals[proposalId].status = ProposalStatus.Active;
+    }
+    
     function _setProposalExecution(
         uint256 proposalId,
         bytes memory executionData,
@@ -429,12 +480,24 @@ contract CouncilGovernance is ReentrancyGuard {
         proposal.value = value;
     }
     
+    function _setProposalTiming(uint256 proposalId) internal {
+        Proposal storage proposal = proposals[proposalId];
+        proposal.createdAt = block.timestamp;
+        proposal.votingEndsAt = block.timestamp + PROPOSAL_VOTING_PERIOD;
+        proposal.executionTime = proposal.votingEndsAt + EXECUTION_DELAY;
+    }
+    
     /**
      * @dev Vote on a proposal
      * @param proposalId ID of the proposal
      * @param choice Vote choice (For, Against, Abstain)
      */
     function voteOnProposal(uint256 proposalId, VoteChoice choice) external onlyCouncilMember {
+        _validateVoteOnProposal(proposalId, choice);
+        _recordVote(proposalId, choice);
+    }
+    
+    function _validateVoteOnProposal(uint256 proposalId, VoteChoice choice) internal view {
         Proposal storage proposal = proposals[proposalId];
         
         if (proposal.status != ProposalStatus.Active) {
@@ -446,6 +509,10 @@ contract CouncilGovernance is ReentrancyGuard {
         if (proposal.hasVoted[msg.sender]) {
             revert AlreadyVoted();
         }
+    }
+    
+    function _recordVote(uint256 proposalId, VoteChoice choice) internal {
+        Proposal storage proposal = proposals[proposalId];
         
         proposal.hasVoted[msg.sender] = true;
         proposal.votes[msg.sender] = choice;
@@ -458,38 +525,34 @@ contract CouncilGovernance is ReentrancyGuard {
             proposal.votesAbstain++;
         }
         
-        emit ProposalVoteCast(proposalId, msg.sender, choice, 1); // Each council member has 1 vote
+        emit ProposalVoteCast(proposalId, msg.sender, choice, 1);
     }
     
     /**
-     * @dev Execute a passed proposal (fixed to avoid stack depth issues)
+     * @dev Execute a passed proposal (FIXED FOR STACK DEPTH)
      */
     function executeProposal(uint256 proposalId) external nonReentrant {
-        Proposal storage proposal = proposals[proposalId];
+        // Step 1: Basic validation
+        _validateProposalExists(proposalId);
         
-        // Validation checks
-        _validateProposalForExecution(proposal);
+        // Step 2: Timing and status validation  
+        _validateProposalTiming(proposalId);
         
-        // Check quorum and votes
-        if (!_checkProposalPassed(proposal)) {
-            proposal.status = ProposalStatus.Failed;
-            revert ProposalNotPassed();
-        }
+        // Step 3: Voting validation
+        _validateProposalVotes(proposalId);
         
-        // Execute the proposal
-        proposal.status = ProposalStatus.Executed;
-        bool success = _executeProposalCall(proposal);
-        
-        emit ProposalExecuted(proposalId, success);
+        // Step 4: Execute
+        _executeProposalAction(proposalId);
     }
     
-    /**
-     * @dev Validate proposal can be executed
-     */
-    function _validateProposalForExecution(Proposal storage proposal) internal view {
-        if (proposal.status != ProposalStatus.Active) {
+    function _validateProposalExists(uint256 proposalId) internal view {
+        if (proposals[proposalId].status != ProposalStatus.Active) {
             revert InvalidProposal();
         }
+    }
+    
+    function _validateProposalTiming(uint256 proposalId) internal view {
+        Proposal storage proposal = proposals[proposalId];
         if (block.timestamp < proposal.executionTime) {
             revert ExecutionDelayNotMet();
         }
@@ -498,35 +561,35 @@ contract CouncilGovernance is ReentrancyGuard {
         }
     }
     
-    /**
-     * @dev Check if proposal passed quorum and voting requirements
-     */
-    function _checkProposalPassed(Proposal storage proposal) internal view returns (bool) {
+    function _validateProposalVotes(uint256 proposalId) internal view {
+        Proposal storage proposal = proposals[proposalId];
         uint256 totalVotes = proposal.votesFor + proposal.votesAgainst + proposal.votesAbstain;
         uint256 requiredQuorum = (_getActiveCouncilSize() * QUORUM_PERCENTAGE) / 100;
         
         if (totalVotes < requiredQuorum) {
             revert QuorumNotMet();
         }
-        
-        return proposal.votesFor > proposal.votesAgainst;
-    }
-    
-    /**
-     * @dev Execute the actual proposal call
-     */
-    function _executeProposalCall(Proposal storage proposal) internal returns (bool) {
-        if (proposal.targetContract != address(0) && proposal.executionData.length > 0) {
-            (bool success,) = proposal.targetContract.call{value: proposal.value}(proposal.executionData);
-            return success;
+        if (proposal.votesFor <= proposal.votesAgainst) {
+            revert ProposalNotPassed();
         }
-        return true;
     }
     
-    // ====== ROLE CONTROLLER INTEGRATION ======
+    function _executeProposalAction(uint256 proposalId) internal {
+        Proposal storage proposal = proposals[proposalId];
+        proposal.status = ProposalStatus.Executed;
+        
+        bool success = true;
+        if (proposal.targetContract != address(0) && proposal.executionData.length > 0) {
+            (success,) = proposal.targetContract.call{value: proposal.value}(proposal.executionData);
+        }
+        
+        emit ProposalExecuted(proposalId, success);
+    }
+    
+    // ====== ROLE CONTROLLER INTEGRATION (FIXED FOR STACK DEPTH) ======
     
     /**
-     * @dev Grant a role through governance proposal
+     * @dev Grant a role through governance proposal (FIXED FOR STACK DEPTH)
      * @param role Role to grant
      * @param account Account to grant role to
      * @param reason Reason for granting the role
@@ -536,25 +599,16 @@ contract CouncilGovernance is ReentrancyGuard {
         address account,
         string calldata reason
     ) external onlyCouncilMember returns (uint256) {
-        bytes memory executionData = abi.encodeWithSignature(
-            "grantRoleWithReason(bytes32,address,string)",
-            role,
-            account,
-            reason
-        );
-        
-        return _createProposal(
-            "Grant Role",
-            string(abi.encodePacked("Grant role to ", reason)),
-            ProposalType.RoleGranting,
-            executionData,
-            address(roleController),
-            0
-        );
+        return _proposeRoleChange(RoleProposalParams({
+            role: role,
+            account: account,
+            reason: reason,
+            isGrant: true
+        }));
     }
     
     /**
-     * @dev Revoke a role through governance proposal
+     * @dev Revoke a role through governance proposal (FIXED FOR STACK DEPTH)
      * @param role Role to revoke
      * @param account Account to revoke role from
      * @param reason Reason for revoking the role
@@ -564,21 +618,37 @@ contract CouncilGovernance is ReentrancyGuard {
         address account,
         string calldata reason
     ) external onlyCouncilMember returns (uint256) {
+        return _proposeRoleChange(RoleProposalParams({
+            role: role,
+            account: account,
+            reason: reason,
+            isGrant: false
+        }));
+    }
+    
+    function _proposeRoleChange(RoleProposalParams memory params) internal returns (uint256) {
+        string memory action = params.isGrant ? "Grant" : "Revoke";
+        string memory functionSig = params.isGrant ? 
+            "grantRoleWithReason(bytes32,address,string)" : 
+            "revokeRoleWithReason(bytes32,address,string)";
+            
         bytes memory executionData = abi.encodeWithSignature(
-            "revokeRoleWithReason(bytes32,address,string)",
-            role,
-            account,
-            reason
+            functionSig,
+            params.role,
+            params.account,
+            params.reason
         );
         
-        return _createProposal(
-            "Revoke Role",
-            string(abi.encodePacked("Revoke role: ", reason)),
-            ProposalType.RoleRevoking,
-            executionData,
-            address(roleController),
-            0
-        );
+        ProposalParams memory proposalParams = ProposalParams({
+            title: string(abi.encodePacked(action, " Role")),
+            description: string(abi.encodePacked(action, " role: ", params.reason)),
+            proposalType: params.isGrant ? ProposalType.RoleGranting : ProposalType.RoleRevoking,
+            executionData: executionData,
+            targetContract: address(roleController),
+            value: 0
+        });
+        
+        return _createProposal(proposalParams);
     }
     
     // ====== INTERNAL FUNCTIONS ======
@@ -609,25 +679,30 @@ contract CouncilGovernance is ReentrancyGuard {
     }
     
     function _updateCouncilWithWinners(address[] memory winners) internal {
-        // Remove expired council members and add new ones
         for (uint256 i = 0; i < winners.length; i++) {
-            if (!isCouncilMember[winners[i]]) {
-                // Add new council member
-                councilMembers.push(CouncilMember({
-                    memberAddress: winners[i],
-                    termStart: block.timestamp,
-                    termEnd: block.timestamp + COUNCIL_TERM_LENGTH,
-                    isActive: true,
-                    votesReceived: 0,
-                    name: candidateProfiles[winners[i]],
-                    contactInfo: ""
-                }));
-                
-                isCouncilMember[winners[i]] = true;
-                councilMemberIndex[winners[i]] = councilMembers.length - 1;
-                
-                emit CouncilMemberElected(winners[i], block.timestamp, block.timestamp + COUNCIL_TERM_LENGTH);
-            }
+            _addNewCouncilMember(winners[i]);
+        }
+    }
+    
+    function _addNewCouncilMember(address winner) internal {
+        if (!isCouncilMember[winner]) {
+            uint256 termStart = block.timestamp;
+            uint256 termEnd = block.timestamp + COUNCIL_TERM_LENGTH;
+            
+            councilMembers.push(CouncilMember({
+                memberAddress: winner,
+                termStart: termStart,
+                termEnd: termEnd,
+                isActive: true,
+                votesReceived: 0,
+                name: candidateProfiles[winner],
+                contactInfo: ""
+            }));
+            
+            isCouncilMember[winner] = true;
+            councilMemberIndex[winner] = councilMembers.length - 1;
+            
+            emit CouncilMemberElected(winner, termStart, termEnd);
         }
     }
     
@@ -651,7 +726,7 @@ contract CouncilGovernance is ReentrancyGuard {
         return count;
     }
     
-    // ====== OPTIMIZED VIEW FUNCTIONS (FIXED FOR STACK DEPTH) ======
+    // ====== OPTIMIZED VIEW FUNCTIONS (ALREADY FIXED FOR STACK DEPTH) ======
     
     function getCouncilMembers() external view returns (CouncilMember[] memory) {
         return councilMembers;

@@ -39,6 +39,16 @@ interface ICouncilGovernance {
         string contactInfo;
     }
     
+    // NEW: Parameter struct for stack depth optimization
+    struct ProposalParams {
+        string title;
+        string description;
+        ProposalType proposalType;
+        bytes executionData;
+        address targetContract;
+        uint256 value;
+    }
+    
     // Council Management
     function registerCandidate(string calldata profile) external payable;
     function startElection(uint256 availableSeats) external;
@@ -46,15 +56,8 @@ interface ICouncilGovernance {
     function finalizeElection(uint256 electionId) external;
     function removeCouncilMember(address member, string calldata reason) external;
     
-    // Proposal System
-    function createProposal(
-        string calldata title,
-        string calldata description,
-        ProposalType proposalType,
-        bytes calldata executionData,
-        address targetContract,
-        uint256 value
-    ) external returns (uint256);
+    // Proposal System - UPDATED SIGNATURE
+    function createProposal(ProposalParams calldata params) external returns (uint256);
     
     function voteOnProposal(uint256 proposalId, VoteChoice choice) external;
     function executeProposal(uint256 proposalId) external;
@@ -77,7 +80,7 @@ interface ICouncilGovernance {
     function getActiveCouncilMembers() external view returns (address[] memory);
     function isCouncilMember(address member) external view returns (bool);
     
-    // Updated view functions to avoid stack depth issues
+    // Split view functions to avoid stack depth issues
     function getProposalBasicInfo(uint256 proposalId) external view returns (
         uint256 id,
         address proposer,
