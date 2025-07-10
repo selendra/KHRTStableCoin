@@ -77,19 +77,38 @@ interface ICouncilGovernance {
     function getActiveCouncilMembers() external view returns (address[] memory);
     function isCouncilMember(address member) external view returns (bool);
     
-    function getProposal(uint256 proposalId) external view returns (
+    // Updated view functions to avoid stack depth issues
+    function getProposalBasicInfo(uint256 proposalId) external view returns (
         uint256 id,
         address proposer,
         string memory title,
         string memory description,
         ProposalType proposalType,
+        ProposalStatus status
+    );
+    
+    function getProposalVotingInfo(uint256 proposalId) external view returns (
         uint256 votesFor,
         uint256 votesAgainst,
         uint256 votesAbstain,
         uint256 createdAt,
         uint256 votingEndsAt,
-        uint256 executionTime,
-        ProposalStatus status
+        uint256 executionTime
+    );
+    
+    function getProposalExecutionData(uint256 proposalId) external view returns (
+        bytes memory executionData,
+        address targetContract,
+        uint256 value
+    );
+    
+    function getElectionCandidates(uint256 electionId) external view returns (address[] memory);
+    function getElectionVotes(uint256 electionId) external view returns (uint256[] memory);
+    function getElectionInfo(uint256 electionId) external view returns (
+        uint256 startTime,
+        uint256 endTime,
+        uint256 availableSeats,
+        bool isActive
     );
     
     function getElectionResults(uint256 electionId) external view returns (

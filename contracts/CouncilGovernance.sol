@@ -15,6 +15,7 @@ import "./interface/IRoleController.sol";
  * - Time-locked execution for security
  * - Emergency council override mechanisms
  * - Integration with RoleController for role management
+ * - Fixed stack depth issues
  */
 contract CouncilGovernance is ReentrancyGuard {
     IRoleController public roleController;
@@ -382,23 +383,50 @@ contract CouncilGovernance is ReentrancyGuard {
         proposalCounter++;
         uint256 proposalId = proposalCounter;
         
+        // Initialize proposal in parts to avoid stack depth issues
+        _initializeProposal(proposalId, title, description, proposalType);
+        _setProposalExecution(proposalId, executionData, targetContract, value);
+        
+        emit ProposalCreated(proposalId, msg.sender, title, proposalType, 
+            block.timestamp + PROPOSAL_VOTING_PERIOD);
+        
+        return proposalId;
+    }
+    
+    /**
+     * @dev Initialize basic proposal data (helper to avoid stack depth)
+     */
+    function _initializeProposal(
+        uint256 proposalId,
+        string memory title,
+        string memory description,
+        ProposalType proposalType
+    ) internal {
         Proposal storage proposal = proposals[proposalId];
         proposal.id = proposalId;
         proposal.proposer = msg.sender;
         proposal.title = title;
         proposal.description = description;
         proposal.proposalType = proposalType;
-        proposal.executionData = executionData;
-        proposal.targetContract = targetContract;
-        proposal.value = value;
         proposal.createdAt = block.timestamp;
         proposal.votingEndsAt = block.timestamp + PROPOSAL_VOTING_PERIOD;
         proposal.executionTime = proposal.votingEndsAt + EXECUTION_DELAY;
         proposal.status = ProposalStatus.Active;
-        
-        emit ProposalCreated(proposalId, msg.sender, title, proposalType, proposal.votingEndsAt);
-        
-        return proposalId;
+    }
+    
+    /**
+     * @dev Set proposal execution parameters (helper to avoid stack depth)
+     */
+    function _setProposalExecution(
+        uint256 proposalId,
+        bytes memory executionData,
+        address targetContract,
+        uint256 value
+    ) internal {
+        Proposal storage proposal = proposals[proposalId];
+        proposal.executionData = executionData;
+        proposal.targetContract = targetContract;
+        proposal.value = value;
     }
     
     /**
@@ -434,12 +462,31 @@ contract CouncilGovernance is ReentrancyGuard {
     }
     
     /**
-     * @dev Execute a passed proposal
-     * @param proposalId ID of the proposal to execute
+     * @dev Execute a passed proposal (fixed to avoid stack depth issues)
      */
     function executeProposal(uint256 proposalId) external nonReentrant {
         Proposal storage proposal = proposals[proposalId];
         
+        // Validation checks
+        _validateProposalForExecution(proposal);
+        
+        // Check quorum and votes
+        if (!_checkProposalPassed(proposal)) {
+            proposal.status = ProposalStatus.Failed;
+            revert ProposalNotPassed();
+        }
+        
+        // Execute the proposal
+        proposal.status = ProposalStatus.Executed;
+        bool success = _executeProposalCall(proposal);
+        
+        emit ProposalExecuted(proposalId, success);
+    }
+    
+    /**
+     * @dev Validate proposal can be executed
+     */
+    function _validateProposalForExecution(Proposal storage proposal) internal view {
         if (proposal.status != ProposalStatus.Active) {
             revert InvalidProposal();
         }
@@ -449,33 +496,31 @@ contract CouncilGovernance is ReentrancyGuard {
         if (block.timestamp <= proposal.votingEndsAt) {
             revert VotingPeriodActive();
         }
-        
-        // Check if proposal passed
+    }
+    
+    /**
+     * @dev Check if proposal passed quorum and voting requirements
+     */
+    function _checkProposalPassed(Proposal storage proposal) internal view returns (bool) {
         uint256 totalVotes = proposal.votesFor + proposal.votesAgainst + proposal.votesAbstain;
-        uint256 activeCouncilSize = _getActiveCouncilSize();
-        uint256 requiredQuorum = (activeCouncilSize * QUORUM_PERCENTAGE) / 100;
+        uint256 requiredQuorum = (_getActiveCouncilSize() * QUORUM_PERCENTAGE) / 100;
         
         if (totalVotes < requiredQuorum) {
-            proposal.status = ProposalStatus.Failed;
             revert QuorumNotMet();
         }
         
-        if (proposal.votesFor <= proposal.votesAgainst) {
-            proposal.status = ProposalStatus.Failed;
-            revert ProposalNotPassed();
-        }
-        
-        // Execute the proposal
-        proposal.status = ProposalStatus.Executed;
-        
-        bool success;
+        return proposal.votesFor > proposal.votesAgainst;
+    }
+    
+    /**
+     * @dev Execute the actual proposal call
+     */
+    function _executeProposalCall(Proposal storage proposal) internal returns (bool) {
         if (proposal.targetContract != address(0) && proposal.executionData.length > 0) {
-            (success,) = proposal.targetContract.call{value: proposal.value}(proposal.executionData);
-        } else {
-            success = true; // For proposals that don't require external calls
+            (bool success,) = proposal.targetContract.call{value: proposal.value}(proposal.executionData);
+            return success;
         }
-        
-        emit ProposalExecuted(proposalId, success);
+        return true;
     }
     
     // ====== ROLE CONTROLLER INTEGRATION ======
@@ -606,7 +651,7 @@ contract CouncilGovernance is ReentrancyGuard {
         return count;
     }
     
-    // ====== VIEW FUNCTIONS ======
+    // ====== OPTIMIZED VIEW FUNCTIONS (FIXED FOR STACK DEPTH) ======
     
     function getCouncilMembers() external view returns (CouncilMember[] memory) {
         return councilMembers;
@@ -627,18 +672,15 @@ contract CouncilGovernance is ReentrancyGuard {
         return activeMembers;
     }
     
-    function getProposal(uint256 proposalId) external view returns (
+    /**
+     * @dev Get basic proposal information (avoids stack too deep)
+     */
+    function getProposalBasicInfo(uint256 proposalId) external view returns (
         uint256 id,
         address proposer,
         string memory title,
         string memory description,
         ProposalType proposalType,
-        uint256 votesFor,
-        uint256 votesAgainst,
-        uint256 votesAbstain,
-        uint256 createdAt,
-        uint256 votingEndsAt,
-        uint256 executionTime,
         ProposalStatus status
     ) {
         Proposal storage proposal = proposals[proposalId];
@@ -648,29 +690,96 @@ contract CouncilGovernance is ReentrancyGuard {
             proposal.title,
             proposal.description,
             proposal.proposalType,
+            proposal.status
+        );
+    }
+    
+    /**
+     * @dev Get proposal voting information (avoids stack too deep)
+     */
+    function getProposalVotingInfo(uint256 proposalId) external view returns (
+        uint256 votesFor,
+        uint256 votesAgainst,
+        uint256 votesAbstain,
+        uint256 createdAt,
+        uint256 votingEndsAt,
+        uint256 executionTime
+    ) {
+        Proposal storage proposal = proposals[proposalId];
+        return (
             proposal.votesFor,
             proposal.votesAgainst,
             proposal.votesAbstain,
             proposal.createdAt,
             proposal.votingEndsAt,
-            proposal.executionTime,
-            proposal.status
+            proposal.executionTime
         );
     }
     
+    /**
+     * @dev Get proposal execution data (avoids stack too deep)
+     */
+    function getProposalExecutionData(uint256 proposalId) external view returns (
+        bytes memory executionData,
+        address targetContract,
+        uint256 value
+    ) {
+        Proposal storage proposal = proposals[proposalId];
+        return (
+            proposal.executionData,
+            proposal.targetContract,
+            proposal.value
+        );
+    }
+    
+    /**
+     * @dev Get election candidates
+     */
+    function getElectionCandidates(uint256 electionId) external view returns (address[] memory) {
+        return elections[electionId].candidates;
+    }
+    
+    /**
+     * @dev Get vote counts for election candidates
+     */
+    function getElectionVotes(uint256 electionId) external view returns (uint256[] memory) {
+        Election storage election = elections[electionId];
+        uint256[] memory votes = new uint256[](election.candidates.length);
+        
+        for (uint256 i = 0; i < election.candidates.length; i++) {
+            votes[i] = election.candidateVotes[election.candidates[i]];
+        }
+        
+        return votes;
+    }
+    
+    /**
+     * @dev Get election basic info
+     */
+    function getElectionInfo(uint256 electionId) external view returns (
+        uint256 startTime,
+        uint256 endTime,
+        uint256 availableSeats,
+        bool isActive
+    ) {
+        Election storage election = elections[electionId];
+        return (
+            election.startTime,
+            election.endTime,
+            election.availableSeats,
+            election.isActive
+        );
+    }
+    
+    /**
+     * @dev Get combined election results (replaces old getElectionResults)
+     */
     function getElectionResults(uint256 electionId) external view returns (
         address[] memory candidates,
         uint256[] memory votes
     ) {
-        Election storage election = elections[electionId];
-        candidates = election.candidates;
-        votes = new uint256[](candidates.length);
-        
-        for (uint256 i = 0; i < candidates.length; i++) {
-            votes[i] = election.candidateVotes[candidates[i]];
-        }
-        
-        return (candidates, votes);
+        candidates = this.getElectionCandidates(electionId);
+        votes = this.getElectionVotes(electionId);
     }
     
     function hasVotedInElection(uint256 electionId, address voter) external view returns (bool) {
