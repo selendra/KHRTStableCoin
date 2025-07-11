@@ -55,9 +55,10 @@ contract GovernanceFactory {
      * @dev Deploy the complete governance system
      * @param config Deployment configuration
      * @return deployed Addresses of all deployed contracts
+     * FIXED: Changed from external to public and calldata to memory for internal calls
      */
-    function deployGovernanceSystem(DeploymentConfig calldata config) 
-        external 
+    function deployGovernanceSystem(DeploymentConfig memory config) 
+        public 
         returns (DeployedContracts memory deployed) 
     {
         require(config.initialCouncilMembers.length >= 3, "Need at least 3 council members");
@@ -110,7 +111,7 @@ contract GovernanceFactory {
      */
     function _initializeSystem(
         DeployedContracts memory deployed, 
-        DeploymentConfig calldata config
+        DeploymentConfig memory config
     ) internal {
         RoleController roleController = RoleController(deployed.roleController);
         CouncilGovernance governance = CouncilGovernance(deployed.councilGovernance);
