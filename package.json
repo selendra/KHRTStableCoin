@@ -14,6 +14,7 @@
     "deploy:local": "hardhat run scripts/deploy.ts",
     "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet",
     "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
+    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
     "node": "hardhat node",
     "clean": "hardhat clean"
   },
