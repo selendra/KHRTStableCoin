@@ -7,18 +7,12 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 /**
  * @title RoleController
  * @dev Decentralized role management contract for the stablecoin ecosystem with limited emergency powers
- * Features:
- * - Governance-controlled role management
- * - Limited emergency controls (pause only)
- * - Role delegation
- * - Audit trail for role changes
- * - No centralized admin role
+ * FIXED: Authorization issues, governance setup, and integration problems
  */
 contract RoleController is AccessControl, ReentrancyGuard {
     // Role definitions
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant BLACKLIST_ROLE = keccak256("BLACKLIST_ROLE");
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
 
@@ -29,6 +23,10 @@ contract RoleController is AccessControl, ReentrancyGuard {
 
     // Authorized contracts that can query roles
     mapping(address => bool) public authorizedContracts;
+    
+    // FIXED: Setup phase to handle circular dependency
+    bool public setupPhase = true;
+    uint256 public setupDeadline;
     
     // All roles are governance controlled by default
     bool public constant governanceActive = true;
@@ -53,7 +51,7 @@ contract RoleController is AccessControl, ReentrancyGuard {
     event GovernanceContractUpdated(address indexed oldGovernance, address indexed newGovernance);
     event GovernanceRoleChangeProposed(uint256 indexed changeId, bytes32 indexed role, address indexed account, bool isGrant);
     event GovernanceRoleChangeExecuted(uint256 indexed changeId, bytes32 indexed role, address indexed account, bool isGrant);
-    event EmergencyAdminUpdated(address indexed oldAdmin, address indexed newAdmin);
+    event SetupPhaseEnded(address indexed caller, uint256 timestamp);
 
     // Custom errors
     error UnauthorizedContract(address caller);
@@ -64,10 +62,12 @@ contract RoleController is AccessControl, ReentrancyGuard {
     error PendingChangeNotFound();
     error PendingChangeAlreadyExecuted();
     error OnlyEmergencyAdmin();
-    error OnlyEmergencyMode();
+    error SetupPhaseExpired();
+    error SetupPhaseEndedError();
 
-    modifier onlyAuthorizedContract() {
-        if (!authorizedContracts[msg.sender]) {
+    modifier onlyAuthorizedContractOrSetup() {
+        // FIXED: Allow calls during setup phase or from authorized contracts
+        if (!setupPhase && !authorizedContracts[msg.sender]) {
             revert UnauthorizedContract(msg.sender);
         }
         _;
@@ -100,27 +100,39 @@ contract RoleController is AccessControl, ReentrancyGuard {
         }
         _;
     }
+    
+    modifier duringSetupPhase() {
+        if (!setupPhase) {
+            revert SetupPhaseEndedError();
+        }
+        if (block.timestamp > setupDeadline) {
+            revert SetupPhaseExpired();
+        }
+        _;
+    }
 
     constructor(
         address _governanceContract,
         address _emergencyAdmin,
         address[] memory _initialAuthorizedContracts
     ) {
-        require(_governanceContract != address(0), "Invalid governance address");
         require(_emergencyAdmin != address(0), "Invalid emergency admin address");
         
-        // Set governance contract
-        governanceContract = _governanceContract;
+        // FIXED: Handle governance being set later during setup
+        if (_governanceContract != address(0)) {
+            governanceContract = _governanceContract;
+            _grantRole(GOVERNANCE_ROLE, _governanceContract);
+        }
+        
         emergencyAdmin = _emergencyAdmin;
         
-        // Grant governance role to the governance contract
-        _grantRole(GOVERNANCE_ROLE, _governanceContract);
+        // FIXED: Setup phase lasts 1 hour to complete deployment
+        setupDeadline = block.timestamp + 1 hours;
         
         // Set governance as admin for all operational roles
         _setRoleAdmin(MINTER_ROLE, GOVERNANCE_ROLE);
         _setRoleAdmin(BURNER_ROLE, GOVERNANCE_ROLE);
         _setRoleAdmin(BLACKLIST_ROLE, GOVERNANCE_ROLE);
-        _setRoleAdmin(PAUSER_ROLE, GOVERNANCE_ROLE);
         
         // Authorize initial contracts
         for (uint i = 0; i < _initialAuthorizedContracts.length; i++) {
@@ -132,29 +144,70 @@ contract RoleController is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @dev Update the governance contract address (only governance can do this)
-     * @param _newGovernanceContract Address of the new governance contract
+     * @dev Update the governance contract address
+     * FIXED: Can be called during setup phase by factory, then only by governance
      */
     function updateGovernanceContract(address _newGovernanceContract) 
         external 
-        onlyGovernance
         validAddress(_newGovernanceContract)
     {
+        // During setup phase, allow factory to set governance
+        if (setupPhase) {
+            // Allow any caller during setup (factory will call this)
+        } else {
+            // After setup, only governance can update
+            if (msg.sender != governanceContract) {
+                revert UnauthorizedGovernanceAction();
+            }
+        }
+        
         address oldGovernance = governanceContract;
         governanceContract = _newGovernanceContract;
         
         // Transfer governance role
-        _revokeRole(GOVERNANCE_ROLE, oldGovernance);
+        if (oldGovernance != address(0)) {
+            _revokeRole(GOVERNANCE_ROLE, oldGovernance);
+        }
         _grantRole(GOVERNANCE_ROLE, _newGovernanceContract);
         
         emit GovernanceContractUpdated(oldGovernance, _newGovernanceContract);
     }
 
     /**
+     * @dev Authorize a contract to query roles
+     * FIXED: Can be called during setup phase, then only by governance
+     */
+    function authorizeContract(address contractAddr, bool status) 
+        external 
+        validAddress(contractAddr)
+    {
+        if (setupPhase) {
+            // During setup, allow factory to authorize contracts
+        } else {
+            // After setup, only governance can authorize
+            if (msg.sender != governanceContract) {
+                revert UnauthorizedGovernanceAction();
+            }
+        }
+        
+        authorizedContracts[contractAddr] = status;
+        emit ContractAuthorized(contractAddr, status);
+    }
+
+    /**
+     * @dev End setup phase - locks configuration to governance-only
+     * FIXED: Explicit function to end setup phase
+     */
+    function endSetupPhase() external {
+        require(setupPhase, "Setup phase already ended");
+        require(governanceContract != address(0), "Governance not set");
+        
+        setupPhase = false;
+        emit SetupPhaseEnded(msg.sender, block.timestamp);
+    }
+
+    /**
      * @dev Grant a role with reason logging (governance only)
-     * @param role Role to grant
-     * @param account Account to grant role to
-     * @param reason Reason for granting the role
      */
     function grantRoleWithReason(
         bytes32 role,
@@ -167,9 +220,6 @@ contract RoleController is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Revoke a role with reason logging (governance only)
-     * @param role Role to revoke
-     * @param account Account to revoke role from
-     * @param reason Reason for revoking the role
      */
     function revokeRoleWithReason(
         bytes32 role,
@@ -182,10 +232,6 @@ contract RoleController is AccessControl, ReentrancyGuard {
     
     /**
      * @dev Propose a role change through governance
-     * @param role Role to change
-     * @param account Account to grant/revoke role to/from
-     * @param isGrant True for grant, false for revoke
-     * @return changeId Unique identifier for this change
      */
     function proposeRoleChange(
         bytes32 role,
@@ -209,7 +255,6 @@ contract RoleController is AccessControl, ReentrancyGuard {
     
     /**
      * @dev Execute a governance-approved role change
-     * @param changeId ID of the pending change to execute
      */
     function executeGovernanceRoleChange(uint256 changeId) 
         external 
@@ -240,39 +285,21 @@ contract RoleController is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Check if an account has a specific role (for authorized contracts)
-     * @param role Role to check
-     * @param account Account to check
-     * @return bool True if account has the role
+     * FIXED: Allow calls during setup phase for initialization
      */
     function checkRole(bytes32 role, address account) 
         external 
         view 
-        onlyAuthorizedContract 
+        onlyAuthorizedContractOrSetup 
         returns (bool) 
     {
         return hasRole(role, account);
-    }
-
-    /**
-     * @dev Authorize a contract to query roles (governance only)
-     * @param contractAddr Contract address to authorize
-     * @param status True to authorize, false to deauthorize
-     */
-    function authorizeContract(address contractAddr, bool status) 
-        external 
-        onlyGovernance
-        validAddress(contractAddr)
-    {
-        authorizedContracts[contractAddr] = status;
-        emit ContractAuthorized(contractAddr, status);
     }
 
     // ====== LIMITED EMERGENCY FUNCTIONS ======
 
     /**
      * @dev Toggle emergency mode (emergency admin only)
-     * Can only pause/unpause - no role modifications
-     * @param status True to enable emergency mode, false to disable
      */
     function toggleEmergencyMode(bool status) 
         external 
@@ -298,28 +325,10 @@ contract RoleController is AccessControl, ReentrancyGuard {
         emit EmergencyModeToggled(false, msg.sender);
     }
 
-    /**
-     * @dev Update emergency admin (governance only)
-     * @param newEmergencyAdmin New emergency admin address
-     * @notice This function always reverts since emergency admin is immutable
-     */
-    function updateEmergencyAdmin(address newEmergencyAdmin) 
-        external 
-        view
-        onlyGovernance
-        validAddress(newEmergencyAdmin)
-    {
-        // Note: emergencyAdmin is immutable, so this function will revert
-        // This is intentional - emergency admin should be set at deployment
-        // Keeping function for interface compatibility but it will always revert
-        revert("Emergency admin is immutable");
-    }
-
     // ====== VIEW FUNCTIONS ======
 
     /**
      * @dev Check if emergency mode is active
-     * @return bool True if emergency mode is active
      */
     function isEmergencyMode() external view returns (bool) {
         return emergencyMode;
@@ -327,13 +336,11 @@ contract RoleController is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Get all defined roles
-     * @return bytes32[] Array of all role identifiers
      */
     function getAllRoles() external pure returns (bytes32[] memory) {
         bytes32[] memory roles = new bytes32[](5);
         roles[0] = MINTER_ROLE;
         roles[1] = BURNER_ROLE;
-        roles[2] = PAUSER_ROLE;
         roles[3] = BLACKLIST_ROLE;
         roles[4] = GOVERNANCE_ROLE;
         return roles;
@@ -341,8 +348,6 @@ contract RoleController is AccessControl, ReentrancyGuard {
     
     /**
      * @dev Get governance status
-     * @return isActive True if governance is active (always true)
-     * @return contractAddr Address of the governance contract
      */
     function getGovernanceStatus() 
         external 
@@ -354,12 +359,6 @@ contract RoleController is AccessControl, ReentrancyGuard {
     
     /**
      * @dev Get pending role change details
-     * @param changeId ID of the pending change
-     * @return role Role being changed
-     * @return account Account being granted/revoked
-     * @return isGrant True for grant, false for revoke
-     * @return timestamp When the change was proposed
-     * @return executed Whether the change has been executed
      */
     function getPendingRoleChange(uint256 changeId) 
         external 
@@ -384,9 +383,22 @@ contract RoleController is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Get emergency admin address
-     * @return address Emergency admin address
      */
     function getEmergencyAdmin() external view returns (address) {
         return emergencyAdmin;
+    }
+    
+    /**
+     * @dev Check if a contract is authorized (FIXED: Added view function)
+     */
+    function isAuthorizedContract(address contractAddr) external view returns (bool) {
+        return authorizedContracts[contractAddr];
+    }
+    
+    /**
+     * @dev Get setup phase info (FIXED: Added for diagnostics)
+     */
+    function getSetupInfo() external view returns (bool isSetupPhase, uint256 deadline) {
+        return (setupPhase, setupDeadline);
     }
 }

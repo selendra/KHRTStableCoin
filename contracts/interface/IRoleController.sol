@@ -9,7 +9,6 @@ interface IRoleController {
     // Role constants
     function MINTER_ROLE() external view returns (bytes32);
     function BURNER_ROLE() external view returns (bytes32);
-    function PAUSER_ROLE() external view returns (bytes32);
     function BLACKLIST_ROLE() external view returns (bytes32);
     function GOVERNANCE_ROLE() external view returns (bytes32);
     

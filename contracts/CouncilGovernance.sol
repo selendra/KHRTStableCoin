@@ -8,12 +8,7 @@ import "./interface/IRoleController.sol";
 /**
  * @title CouncilGovernance
  * @dev Decentralized governance contract for managing stablecoin ecosystem
- * Features:
- * - Multi-signature council governance (no single admin)
- * - Time-locked proposal execution
- * - Flexible voting thresholds
- * - Council membership management through voting
- * - Integration with RoleController for role management
+ * ENHANCED: Better integration with RoleController and improved error handling
  */
 contract CouncilGovernance is ReentrancyGuard, Pausable {
     
@@ -76,6 +71,10 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     uint256 public constant MAX_COUNCIL = 15;
     uint256 public constant BASIS_POINTS = 100;
     
+    // ENHANCED: Integration tracking
+    bool public isInitialized;
+    mapping(uint256 => uint256) public roleChangeIds; // proposal -> roleController changeId
+    
     // ====== EVENTS ======
     
     event ProposalCreated(uint256 indexed id, address indexed proposer, uint8 proposalType);
@@ -84,6 +83,9 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     event CouncilAdded(address indexed member, uint256 power);
     event CouncilRemoved(address indexed member);
     event ConfigUpdated(uint256 votingPeriod, uint256 timeLock, uint256 quorum);
+    event SystemInitialized(address indexed roleController);
+    event RoleChangeProposed(uint256 indexed proposalId, uint256 indexed roleChangeId);
+    event RoleChangeError(uint256 indexed proposalId, string reason);
     
     // ====== ERRORS ======
     
@@ -97,6 +99,9 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     error ExecutionFailed();
     error InvalidMember();
     error InvalidConfig();
+    error NotInitialized();
+    error AlreadyInitialized();
+    error IntegrationFailed();
     
     // ====== MODIFIERS ======
     
@@ -107,6 +112,11 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     
     modifier validProposal(uint256 id) {
         if (id >= nextProposalId) revert InvalidProposal();
+        _;
+    }
+    
+    modifier whenInitialized() {
+        if (!isInitialized) revert NotInitialized();
         _;
     }
     
@@ -126,6 +136,10 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < _members.length; i++) {
             _addCouncilInternal(_members[i], _powers[i]);
         }
+        
+        // ENHANCED: Mark as initialized once setup is complete
+        isInitialized = true;
+        emit SystemInitialized(_roleController);
     }
     
     // ====== COUNCIL MANAGEMENT ======
@@ -177,7 +191,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         address account,
         bool isGrant,
         string calldata description
-    ) external onlyCouncil whenNotPaused returns (uint256) {
+    ) external onlyCouncil whenNotPaused whenInitialized returns (uint256) {
         require(account != address(0), "Invalid account");
         
         uint256 id = nextProposalId++;
@@ -206,7 +220,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         address newMember,
         uint256 power,
         string calldata description
-    ) external onlyCouncil whenNotPaused returns (uint256) {
+    ) external onlyCouncil whenNotPaused whenInitialized returns (uint256) {
         require(newMember != address(0), "Invalid member");
         require(!councils[newMember].isActive, "Already member");
         require(power > 0, "Invalid power");
@@ -238,7 +252,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     function proposeRemoveMember(
         address member,
         string calldata description
-    ) external onlyCouncil whenNotPaused returns (uint256) {
+    ) external onlyCouncil whenNotPaused whenInitialized returns (uint256) {
         require(member != address(0), "Invalid member");
         require(councils[member].isActive, "Not member");
         require(member != msg.sender, "Cannot remove self");
@@ -270,7 +284,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         address target,
         bytes calldata data,
         string calldata description
-    ) external onlyCouncil whenNotPaused returns (uint256) {
+    ) external onlyCouncil whenNotPaused whenInitialized returns (uint256) {
         require(target != address(0), "Invalid target");
         
         uint256 id = nextProposalId++;
@@ -298,7 +312,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     
     // ====== VOTING ======
     
-    function vote(uint256 id, bool support) external onlyCouncil validProposal(id) {
+    function vote(uint256 id, bool support) external onlyCouncil validProposal(id) whenInitialized {
         ProposalCore memory core = proposalCore[id];
         
         if (core.state != 1) revert InvalidProposal(); // Must be ACTIVE
@@ -335,7 +349,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         }
     }
     
-    function execute(uint256 id) external validProposal(id) nonReentrant {
+    function execute(uint256 id) external validProposal(id) nonReentrant whenInitialized {
         ProposalCore memory core = proposalCore[id];
         ProposalAction memory action = proposalActions[id];
         
@@ -348,7 +362,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         bool success;
         
         if (core.proposalType == 0) { // ROLE_CHANGE
-            success = _executeRoleChange(action.role, action.target, action.isGrant);
+            success = _executeRoleChange(id, action.role, action.target, action.isGrant);
         } else if (core.proposalType == 1) { // MEMBER_ADD
             uint256 power = abi.decode(proposalData[id], (uint256));
             _addCouncilInternal(action.target, power);
@@ -365,13 +379,37 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         if (!success) revert ExecutionFailed();
     }
     
-    function _executeRoleChange(bytes32 role, address account, bool isGrant) internal returns (bool) {
+    // ENHANCED: Better role change execution with proper tracking
+    function _executeRoleChange(uint256 proposalId, bytes32 role, address account, bool isGrant) internal returns (bool) {
         try roleController.proposeRoleChange(role, account, isGrant) returns (uint256 changeId) {
+            // Store the role change ID for tracking
+            roleChangeIds[proposalId] = changeId;
+            emit RoleChangeProposed(proposalId, changeId);
+            
             try roleController.executeGovernanceRoleChange(changeId) {
                 return true;
+            } catch Error(string memory reason) {
+               emit RoleChangeError(proposalId, reason); // Now using the reason
+                return false;
             } catch {
                 return false;
             }
+        } catch Error(string memory reason) {
+            emit RoleChangeError(proposalId, reason);
+            return false;
+        } catch {
+            return false;
+        }
+    }
+    
+    // ENHANCED: Allow manual retry of failed role changes
+    function retryRoleChange(uint256 proposalId) external onlyCouncil returns (bool) {
+        require(proposalCore[proposalId].state == 4, "Proposal not executed");
+        require(proposalCore[proposalId].proposalType == 0, "Not a role change proposal");
+        require(roleChangeIds[proposalId] > 0, "No role change ID found");
+        
+        try roleController.executeGovernanceRoleChange(roleChangeIds[proposalId]) {
+            return true;
         } catch {
             return false;
         }
@@ -381,7 +419,7 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         uint256 _votingPeriod,
         uint256 _timeLock,
         uint256 _quorumPercent
-    ) external onlyCouncil {
+    ) external onlyCouncil whenInitialized {
         require(_votingPeriod >= 1 hours && _votingPeriod <= 30 days, "Invalid voting period");
         require(_timeLock >= 0 && _timeLock <= 7 days, "Invalid timelock");
         require(_quorumPercent >= 1 && _quorumPercent <= 100, "Invalid quorum");
@@ -392,6 +430,8 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         
         emit ConfigUpdated(_votingPeriod, _timeLock, _quorumPercent);
     }
+    
+    // ====== VIEW FUNCTIONS ======
     
     function getProposalState(uint256 id) external view returns (
         address proposer,
@@ -443,6 +483,30 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
         return (hasVoted[id][voter], voteChoice[id][voter]);
     }
     
+    // ENHANCED: Integration status checking
+    function getIntegrationStatus() external view returns (
+        address roleControllerAddr,
+        bool isRoleControllerSet,
+        bool isGovernanceInitialized,
+        bool hasGovernanceRole
+    ) {
+        roleControllerAddr = address(roleController);
+        isRoleControllerSet = roleControllerAddr != address(0);
+        isGovernanceInitialized = isInitialized;
+        
+        if (isRoleControllerSet) {
+            try roleController.checkRole(roleController.GOVERNANCE_ROLE(), address(this)) returns (bool hasRole) {
+                hasGovernanceRole = hasRole;
+            } catch {
+                hasGovernanceRole = false;
+            }
+        }
+    }
+    
+    function getRoleChangeId(uint256 proposalId) external view returns (uint256) {
+        return roleChangeIds[proposalId];
+    }
+    
     function emergencyPause() external {
         require(councils[msg.sender].isActive, "Only council");
         _pause();
@@ -451,4 +515,5 @@ contract CouncilGovernance is ReentrancyGuard, Pausable {
     function emergencyUnpause() external onlyCouncil {
         _unpause();
     }
+
 }

@@ -1,160 +1,167 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+/**
+ * @title ICouncilGovernance
+ * @dev Interface for the Council Governance system
+ * FIXED: Now matches the actual CouncilGovernance implementation
+ */
 interface ICouncilGovernance {
-    // Enums
+    
+    // Enums for proposal types and states
     enum ProposalType {
-        RoleGranting,
-        RoleRevoking,
-        ConfigChange,
-        EmergencyAction,
-        CouncilRemoval,
-        ContractUpgrade,
-        TreasuryAction
+        RoleChange,      // 0
+        MemberAdd,       // 1
+        MemberRemove,    // 2
+        Execution        // 3
     }
     
-    enum ProposalStatus {
-        Active,
-        Executed,
-        Cancelled,
-        Failed,
-        Expired
-    }
-    
-    enum VoteChoice {
-        None,
-        For,
-        Against,
-        Abstain
+    enum ProposalState {
+        Pending,         // 0
+        Active,          // 1
+        Defeated,        // 2
+        Succeeded,       // 3
+        Executed         // 4
     }
     
     // Structs
-    struct CouncilMember {
-        address memberAddress;
-        uint256 termStart;
-        uint256 termEnd;
+    struct Council {
         bool isActive;
-        uint256 votesReceived;
-        string name;
-        string contactInfo;
+        uint256 votingPower;
+        uint256 joinedAt;
     }
     
-    // NEW: Parameter struct for stack depth optimization
-    struct ProposalParams {
-        string title;
+    struct ProposalInfo {
+        address proposer;
+        uint8 proposalType;
+        uint8 state;
+        uint256 deadline;
+        uint256 executeTime;
+        uint256 forVotes;
+        uint256 againstVotes;
+    }
+    
+    struct ProposalAction {
+        address target;
+        bytes32 role;
+        bool isGrant;
         string description;
-        ProposalType proposalType;
-        bytes executionData;
-        address targetContract;
-        uint256 value;
     }
     
-    // Council Management
-    function registerCandidate(string calldata profile) external payable;
-    function startElection(uint256 availableSeats) external;
-    function voteInElection(uint256 electionId, address candidate) external;
-    function finalizeElection(uint256 electionId) external;
-    function removeCouncilMember(address member, string calldata reason) external;
+    // ====== PROPOSAL CREATION ======
     
-    // Proposal System - UPDATED SIGNATURE
-    function createProposal(ProposalParams calldata params) external returns (uint256);
-    
-    function voteOnProposal(uint256 proposalId, VoteChoice choice) external;
-    function executeProposal(uint256 proposalId) external;
-    
-    // Role Controller Integration
-    function proposeGrantRole(
+    function proposeRoleChange(
         bytes32 role,
         address account,
-        string calldata reason
+        bool isGrant,
+        string calldata description
     ) external returns (uint256);
     
-    function proposeRevokeRole(
-        bytes32 role,
-        address account,
-        string calldata reason
+    function proposeAddMember(
+        address newMember,
+        uint256 power,
+        string calldata description
     ) external returns (uint256);
     
-    // View Functions
-    function getCouncilMembers() external view returns (CouncilMember[] memory);
-    function getActiveCouncilMembers() external view returns (address[] memory);
-    function isCouncilMember(address member) external view returns (bool);
+    function proposeRemoveMember(
+        address member,
+        string calldata description
+    ) external returns (uint256);
     
-    // Split view functions to avoid stack depth issues
-    function getProposalBasicInfo(uint256 proposalId) external view returns (
-        uint256 id,
+    function proposeExecution(
+        address target,
+        bytes calldata data,
+        string calldata description
+    ) external returns (uint256);
+    
+    // ====== VOTING ======
+    
+    function vote(uint256 id, bool support) external;
+    function execute(uint256 id) external;
+    function retryRoleChange(uint256 proposalId) external returns (bool);
+    
+    // ====== CONFIGURATION ======
+    
+    function updateConfig(
+        uint256 _votingPeriod,
+        uint256 _timeLock,
+        uint256 _quorumPercent
+    ) external;
+    
+    // ====== VIEW FUNCTIONS ======
+    
+    function getProposalState(uint256 id) external view returns (
         address proposer,
-        string memory title,
-        string memory description,
-        ProposalType proposalType,
-        ProposalStatus status
+        uint8 proposalType,
+        uint8 state,
+        uint256 deadline,
+        uint256 executeTime,
+        uint256 forVotes,
+        uint256 againstVotes
     );
     
-    function getProposalVotingInfo(uint256 proposalId) external view returns (
-        uint256 votesFor,
-        uint256 votesAgainst,
-        uint256 votesAbstain,
-        uint256 createdAt,
-        uint256 votingEndsAt,
-        uint256 executionTime
+    function getProposalAction(uint256 id) external view returns (
+        address target,
+        bytes32 role,
+        bool isGrant,
+        string memory description
     );
     
-    function getProposalExecutionData(uint256 proposalId) external view returns (
-        bytes memory executionData,
-        address targetContract,
-        uint256 value
+    function getCouncilInfo(address member) external view returns (
+        bool isActive,
+        uint256 votingPower,
+        uint256 joinedAt
     );
     
-    function getElectionCandidates(uint256 electionId) external view returns (address[] memory);
-    function getElectionVotes(uint256 electionId) external view returns (uint256[] memory);
-    function getElectionInfo(uint256 electionId) external view returns (
-        uint256 startTime,
-        uint256 endTime,
-        uint256 availableSeats,
-        bool isActive
+    function getCouncilList() external view returns (address[] memory);
+    
+    function hasVotedOn(uint256 id, address voter) external view returns (bool voted, bool choice);
+    
+    function getIntegrationStatus() external view returns (
+        address roleControllerAddr,
+        bool isRoleControllerSet,
+        bool isGovernanceInitialized,
+        bool hasGovernanceRole
     );
     
-    function getElectionResults(uint256 electionId) external view returns (
-        address[] memory candidates,
-        uint256[] memory votes
+    function getRoleChangeId(uint256 proposalId) external view returns (uint256);
+    
+    function systemHealthCheck() external view returns (
+        bool councilHealthy,
+        bool roleControllerHealthy,
+        bool governanceRoleActive,
+        string memory statusMessage
     );
     
-    function hasVotedInElection(uint256 electionId, address voter) external view returns (bool);
-    function hasVotedOnProposal(uint256 proposalId, address voter) external view returns (bool);
-    function getVoteOnProposal(uint256 proposalId, address voter) external view returns (VoteChoice);
+    // ====== CONFIGURATION GETTERS ======
     
-    // Constants
-    function MAX_COUNCIL_SIZE() external view returns (uint256);
-    function MIN_COUNCIL_SIZE() external view returns (uint256);
-    function COUNCIL_TERM_LENGTH() external view returns (uint256);
-    function ELECTION_PERIOD() external view returns (uint256);
-    function PROPOSAL_VOTING_PERIOD() external view returns (uint256);
-    function EXECUTION_DELAY() external view returns (uint256);
-    function QUORUM_PERCENTAGE() external view returns (uint256);
+    function votingPeriod() external view returns (uint256);
+    function timeLock() external view returns (uint256);
+    function quorumPercent() external view returns (uint256);
+    function nextProposalId() external view returns (uint256);
+    function totalVotingPower() external view returns (uint256);
+    function activeMembers() external view returns (uint256);
     
-    // Events
-    event CouncilMemberElected(address indexed member, uint256 indexed termStart, uint256 indexed termEnd);
-    event CouncilMemberTermEnded(address indexed member, uint256 indexed termEnd);
-    event CouncilMemberRemoved(address indexed member, string reason);
+    // ====== CONSTANTS ======
     
-    event ElectionStarted(uint256 indexed electionId, uint256 startTime, uint256 endTime, uint256 availableSeats);
-    event ElectionEnded(uint256 indexed electionId, address[] winners);
-    event CandidateRegistered(address indexed candidate, string profile);
-    event VoteCast(uint256 indexed electionId, address indexed voter, address indexed candidate, uint256 votingPower);
+    function MIN_COUNCIL() external view returns (uint256);
+    function MAX_COUNCIL() external view returns (uint256);
+    function BASIS_POINTS() external view returns (uint256);
     
-    event ProposalCreated(
-        uint256 indexed proposalId,
-        address indexed proposer,
-        string title,
-        ProposalType proposalType,
-        uint256 votingEndsAt
-    );
-    event ProposalVoteCast(
-        uint256 indexed proposalId,
-        address indexed voter,
-        VoteChoice choice,
-        uint256 votingPower
-    );
-    event ProposalExecuted(uint256 indexed proposalId, bool success);
-    event ProposalCancelled(uint256 indexed proposalId, string reason);
+    // ====== EMERGENCY FUNCTIONS ======
+    
+    function emergencyPause() external;
+    function emergencyUnpause() external;
+    function paused() external view returns (bool);
+    
+    // ====== EVENTS ======
+    
+    event ProposalCreated(uint256 indexed id, address indexed proposer, uint8 proposalType);
+    event VoteCast(uint256 indexed id, address indexed voter, bool support, uint256 power);
+    event ProposalExecuted(uint256 indexed id, bool success);
+    event CouncilAdded(address indexed member, uint256 power);
+    event CouncilRemoved(address indexed member);
+    event ConfigUpdated(uint256 votingPeriod, uint256 timeLock, uint256 quorum);
+    event SystemInitialized(address indexed roleController);
+    event RoleChangeProposed(uint256 indexed proposalId, uint256 indexed roleChangeId);
 }
