@@ -19,6 +19,11 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
 
     IKHRTStablecoin public immutable khrtToken;
     
+    // Minimum collateral ratio (100% = 10000 basis points)
+    // Users must maintain at least 100% collateral ratio
+    // No liquidation mechanism - users can only withdraw what maintains minimum ratio
+    uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
+    
     // Collateral token address => ratio (how many collateral tokens = 1 KHRT)
     mapping(address => uint256) public collateralRatios;
     
@@ -101,6 +106,14 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         uint256 collateralAmount = khrtAmount * collateralRatios[token];
         require(userCollateralBalances[msg.sender][token] >= collateralAmount, "CollateralManager: Insufficient collateral balance");
 
+        // Check minimum collateral ratio (100%) - ensure remaining position is properly collateralized
+        uint256 remainingMinted = userMintedAmounts[msg.sender][token] - khrtAmount;
+        if (remainingMinted > 0) {
+            uint256 remainingCollateral = userCollateralBalances[msg.sender][token] - collateralAmount;
+            uint256 requiredCollateral = remainingMinted * collateralRatios[token];
+            require(remainingCollateral >= requiredCollateral, "CollateralManager: Would violate minimum collateral ratio");
+        }
+
         // Burn KHRT tokens first
         khrtToken.burnFrom(msg.sender, khrtAmount);
 
@@ -150,15 +163,55 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     function getUserPosition(address user, address token) external view returns (
         uint256 collateralBalance,
         uint256 mintedAmount,
-        uint256 withdrawableCollateral
+        uint256 collateralRatio,
+        uint256 maxWithdrawableKHRT
     ) {
         collateralBalance = userCollateralBalances[user][token];
         mintedAmount = userMintedAmounts[user][token];
         
-        // Calculate how much collateral can be withdrawn with current minted amount
-        if (collateralRatios[token] > 0) {
-            withdrawableCollateral = mintedAmount * collateralRatios[token];
+        // Calculate current collateral ratio (in basis points, 10000 = 100%)
+        if (mintedAmount > 0 && collateralRatios[token] > 0) {
+            uint256 requiredCollateral = mintedAmount * collateralRatios[token];
+            collateralRatio = (collateralBalance * 10000) / requiredCollateral;
+        } else {
+            collateralRatio = 0;
         }
+        
+        // Calculate maximum KHRT that can be withdrawn while maintaining minimum ratio
+        if (mintedAmount > 0 && collateralBalance > 0) {
+            uint256 maxWithdrawableCollateral = collateralBalance - (mintedAmount * collateralRatios[token]);
+            maxWithdrawableKHRT = maxWithdrawableCollateral / collateralRatios[token];
+        } else {
+            maxWithdrawableKHRT = mintedAmount; // Can withdraw all if no collateral restrictions
+        }
+    }
+
+    /**
+     * @dev Get current collateral ratio for a user's position
+     * @param user Address of the user
+     * @param token Address of the collateral token
+     * @return ratio Current collateral ratio in basis points (10000 = 100%)
+     */
+    function getCurrentCollateralRatio(address user, address token) external view returns (uint256 ratio) {
+        uint256 collateralBalance = userCollateralBalances[user][token];
+        uint256 mintedAmount = userMintedAmounts[user][token];
+        
+        if (mintedAmount > 0 && collateralRatios[token] > 0) {
+            uint256 requiredCollateral = mintedAmount * collateralRatios[token];
+            ratio = (collateralBalance * 10000) / requiredCollateral;
+        } else {
+            ratio = 0;
+        }
+    }
+
+    /**
+     * @dev Check if a user's position meets minimum collateral ratio
+     * @param user Address of the user
+     * @param token Address of the collateral token
+     */
+    function isPositionHealthy(address user, address token) external view returns (bool) {
+        uint256 currentRatio = this.getCurrentCollateralRatio(user, token);
+        return currentRatio >= MIN_COLLATERAL_RATIO || userMintedAmounts[user][token] == 0;
     }
 
     /**
@@ -186,6 +239,14 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
      */
     function calculateCollateralNeeded(address token, uint256 khrtAmount) external view returns (uint256) {
         return khrtAmount * collateralRatios[token];
+    }
+
+    /**
+     * @dev Get the minimum collateral ratio requirement
+     * @return ratio Minimum collateral ratio in basis points (10000 = 100%)
+     */
+    function getMinimumCollateralRatio() external pure returns (uint256) {
+        return MIN_COLLATERAL_RATIO;
     }
 
     /**
