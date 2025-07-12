@@ -7,10 +7,18 @@ async function main() {
   console.log("Deploying contracts with the account:", deployer.address);
   console.log("Account balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)));
 
+  // Get current gas price and add buffer
+  const baseGasPrice = await ethers.provider.getFeeData();
+  const gasPrice = baseGasPrice.gasPrice ? baseGasPrice.gasPrice * 120n / 100n : undefined; // 20% buffer
+  
+  console.log("Using gas price:", gasPrice ? ethers.formatUnits(gasPrice, "gwei") + " gwei" : "auto");
+
   // Deploy KHRT Stablecoin first
   console.log("\n=== Deploying KHRT Stablecoin ===");
   const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
-  const khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR");
+  const khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR", {
+    gasPrice: gasPrice
+  });
   await khrtToken.waitForDeployment();
   const khrtAddress = await khrtToken.getAddress();
   
@@ -19,20 +27,27 @@ async function main() {
   // Deploy Collateral Manager
   console.log("\n=== Deploying Collateral Manager ===");
   const KHRTCollateralManager = await ethers.getContractFactory("KHRTCollateralManager");
-  const collateralManager = await KHRTCollateralManager.deploy(khrtAddress);
+  const collateralManager = await KHRTCollateralManager.deploy(khrtAddress, {
+    gasPrice: gasPrice
+  });
   await collateralManager.waitForDeployment();
   const collateralManagerAddress = await collateralManager.getAddress();
   
   console.log("Collateral Manager deployed to:", collateralManagerAddress);
 
-  // Setup initial configuration
+  // Setup initial configuration with proper gas management
   console.log("\n=== Setting up initial configuration ===");
 
   // Authorize collateral manager as a collateral minter
   console.log("Authorizing Collateral Manager as collateral minter...");
-  const authorizeTx = await khrtToken.setCollateralMinter(collateralManagerAddress, true);
+  const authorizeTx = await khrtToken.setCollateralMinter(collateralManagerAddress, true, {
+    gasPrice: gasPrice
+  });
   await authorizeTx.wait();
   console.log("✓ Collateral Manager authorized");
+
+  // Add delay between transactions to prevent nonce conflicts
+  await new Promise(resolve => setTimeout(resolve, 2000));
 
   // Deploy mock ERC20 tokens for testing/demo (only on testnets)
   const network = await ethers.provider.getNetwork();
@@ -43,42 +58,110 @@ async function main() {
     
     // Deploy Mock USDC
     const MockERC20 = await ethers.getContractFactory("MockERC20");
-    const mockUSDC = await MockERC20.deploy("Mock USDC", "USDC", 6); // 6 decimals like real USDC
+    const mockUSDC = await MockERC20.deploy("Mock USDC", "USDC", 6, {
+      gasPrice: gasPrice
+    });
     await mockUSDC.waitForDeployment();
     const mockUSDCAddress = await mockUSDC.getAddress();
     console.log("Mock USDC deployed to:", mockUSDCAddress);
 
-    // Deploy Mock USDT
-    const mockUSDT = await MockERC20.deploy("Mock USDT", "USDT", 6); // 6 decimals like real USDT
-    await mockUSDT.waitForDeployment();
-    const mockUSDTAddress = await mockUSDT.getAddress();
-    console.log("Mock USDT deployed to:", mockUSDTAddress);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Deploy Mock STAR with 18 decimals
+    const mockSTAR = await MockERC20.deploy("Mock STAR", "STAR", 18, {
+      gasPrice: gasPrice
+    });
+    await mockSTAR.waitForDeployment();
+    const mockSTARAddress = await mockSTAR.getAddress();
+    console.log("Mock STAR deployed to:", mockSTARAddress);
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Whitelist mock tokens in KHRT
     console.log("\nWhitelisting mock tokens...");
-    await (await khrtToken.setTokenWhitelist(mockUSDCAddress, true)).wait();
-    await (await khrtToken.setTokenWhitelist(mockUSDTAddress, true)).wait();
+    await (await khrtToken.setTokenWhitelist(mockUSDCAddress, true, {
+      gasPrice: gasPrice
+    })).wait();
+    
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    await (await khrtToken.setTokenWhitelist(mockSTARAddress, true, {
+      gasPrice: gasPrice
+    })).wait();
     console.log("✓ Mock tokens whitelisted");
 
-    // Set collateral ratios (1:1 for stablecoins, adjusted for decimals)
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Set collateral ratios
     console.log("\nSetting collateral ratios...");
-    // For 6-decimal tokens to 18-decimal KHRT: ratio = 10^12 (1:1 value ratio)
-    const stablecoinRatio = ethers.parseUnits("1", 12); // 1e12
     
-    await (await collateralManager.setCollateralRatio(mockUSDCAddress, stablecoinRatio)).wait();
-    await (await collateralManager.setCollateralRatio(mockUSDTAddress, stablecoinRatio)).wait();
-    console.log("✓ Collateral ratios set (1:1 for stablecoins)");
+    // For USDC (6 decimals): 1 USDC = 1 KHRT
+    // USDC has 6 decimals, KHRT has 18 decimals
+    // To get 1 USDC (1e6) = 1 KHRT (1e18), ratio needs to be 1e12
+    const usdcRatio = ethers.parseUnits("1", 12); // 1e12
+    
+    // For STAR (18 decimals): 1 STAR = 40 KHRT (based on 100 STAR = 4000 KHRT)
+    // STAR has 18 decimals, KHRT has 18 decimals
+    // To get 1 STAR (1e18) = 40 KHRT (40e18), ratio needs to be 40
+    const starRatio = 40n; // Simple integer 40
+    
+    await (await collateralManager.setCollateralRatio(mockUSDCAddress, usdcRatio, {
+      gasPrice: gasPrice
+    })).wait();
+    console.log("✓ USDC ratio set (1:1)");
+    
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    await (await collateralManager.setCollateralRatio(mockSTARAddress, starRatio, {
+      gasPrice: gasPrice
+    })).wait();
+    console.log("✓ STAR ratio set (1:40 - 100 STAR = 4000 KHRT)");
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Mint some mock tokens to deployer for testing
     console.log("\nMinting mock tokens for testing...");
-    const mintAmount = ethers.parseUnits("1000000", 6); // 1M tokens with 6 decimals
-    await (await mockUSDC.mint(deployer.address, mintAmount)).wait();
-    await (await mockUSDT.mint(deployer.address, mintAmount)).wait();
-    console.log("✓ Minted 1M USDC and 1M USDT to deployer");
+    
+    // Mint USDC (6 decimals)
+    const usdcMintAmount = ethers.parseUnits("1000000", 6); // 1M USDC
+    await (await mockUSDC.mint(deployer.address, usdcMintAmount, {
+      gasPrice: gasPrice
+    })).wait();
+    
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Mint STAR (18 decimals)
+    const starMintAmount = ethers.parseUnits("1000000", 18); // 1M STAR
+    await (await mockSTAR.mint(deployer.address, starMintAmount, {
+      gasPrice: gasPrice
+    })).wait();
+    console.log("✓ Minted 1M USDC and 1M STAR to deployer");
+
+    // Verify the ratios are set correctly
+    console.log("\n=== Verifying Collateral Ratios ===");
+    const usdcRatioSet = await collateralManager.getCollateralRatio(mockUSDCAddress);
+    const starRatioSet = await collateralManager.getCollateralRatio(mockSTARAddress);
+    
+    console.log("USDC ratio:", usdcRatioSet.toString());
+    console.log("STAR ratio:", starRatioSet.toString());
+    
+    // Calculate expected minting amounts for demonstration
+    const oneUSDC = ethers.parseUnits("1", 6);
+    const oneSTAR = ethers.parseUnits("1", 18);
+    const hundredSTAR = ethers.parseUnits("100", 18);
+    
+    const khrtFromOneUSDC = await collateralManager.calculateMintAmount(mockUSDCAddress, oneUSDC);
+    const khrtFromOneSTAR = await collateralManager.calculateMintAmount(mockSTARAddress, oneSTAR);
+    const khrtFromHundredSTAR = await collateralManager.calculateMintAmount(mockSTARAddress, hundredSTAR);
+    
+    console.log("\n=== Minting Calculations ===");
+    console.log("1 USDC would mint:", ethers.formatEther(khrtFromOneUSDC), "KHRT");
+    console.log("1 STAR would mint:", ethers.formatEther(khrtFromOneSTAR), "KHRT");
+    console.log("100 STAR would mint:", ethers.formatEther(khrtFromHundredSTAR), "KHRT");
 
     console.log("\n=== Mock Token Addresses ===");
     console.log("Mock USDC:", mockUSDCAddress);
-    console.log("Mock USDT:", mockUSDTAddress);
+    console.log("Mock STAR:", mockSTARAddress);
   }
 
   // Verify deployment
@@ -120,6 +203,10 @@ async function main() {
       KHRTCollateralManager: collateralManagerAddress,
     },
     deployer: deployer.address,
+    collateralRatios: {
+      USDC: "1:1 (1 USDC = 1 KHRT)",
+      STAR: "1:40 (1 STAR = 40 KHRT, 100 STAR = 4000 KHRT)"
+    }
   };
 
   console.log("\n=== Deployment Info ===");

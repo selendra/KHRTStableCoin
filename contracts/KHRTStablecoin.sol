@@ -13,7 +13,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     uint256 public constant MIN_BURN_AMOUNT = 1e18; // 1 KHRT minimum burn
     
     // State variables
-    uint256 public maxSupply = 1_000_000_000 * 1e18; // 1 billion KHRT initial max supply
+    uint256 public maxSupply = 1_000_000_000 * 1e18;
     mapping(address => bool) public whitelistedTokens;
     mapping(address => bool) public collateralMinters;
     mapping(address => bool) public normalMinters;

@@ -12,8 +12,7 @@
     "test:gas": "REPORT_GAS=true hardhat test",
     "compile": "hardhat compile",
     "deploy:local": "hardhat run scripts/deploy.ts",
-    "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet",
-    "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
+    "deploy:selendra": "hardhat run scripts/deploy.ts --network selendra",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
     "node": "hardhat node",
     "clean": "hardhat clean"

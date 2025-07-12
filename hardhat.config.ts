@@ -42,6 +42,14 @@ const config: HardhatUserConfig = {
       gasPrice: "auto",
       gas: "auto"
     },
+     selendra: {
+      url: process.env.SELENDRA_RPC || "https://rpcx.selendra.org",
+      accounts: 
+        process.env.SELENDRA_PRIVATE_KEY ? [process.env.SELENDRA_PRIVATE_KEY] : [],
+      chainId: 1961,
+      gasPrice: "auto",
+      gas: "auto"
+    },
   },
   mocha: {
     timeout: 60000, // 60 seconds for complex tests
