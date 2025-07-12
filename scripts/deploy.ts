@@ -10,7 +10,7 @@ async function main() {
   // Deploy KHRT Stablecoin first
   console.log("\n=== Deploying KHRT Stablecoin ===");
   const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
-  const khrtToken = await KHRTStablecoin.deploy();
+  const khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR");
   await khrtToken.waitForDeployment();
   const khrtAddress = await khrtToken.getAddress();
   
@@ -88,7 +88,7 @@ async function main() {
   const name = await khrtToken.name();
   const symbol = await khrtToken.symbol();
   const decimals = await khrtToken.decimals();
-  const maxSupply = await khrtToken.MAX_SUPPLY();
+  const maxSupply = await khrtToken.getMaxSupply();
   
   console.log("KHRT Token Details:");
   console.log("- Name:", name);

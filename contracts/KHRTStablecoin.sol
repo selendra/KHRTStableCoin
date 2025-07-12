@@ -30,7 +30,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     event TokensBurnedFrom(address indexed owner, address indexed burner, uint256 amount);
     event MaxSupplyIncreased(uint256 oldMaxSupply, uint256 newMaxSupply, address indexed increasedBy);
 
-    constructor() ERC20("Khmer Riel Token", "KHRT") Ownable(msg.sender) {
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) Ownable(msg.sender) {
         collateralMinters[msg.sender] = true;
         normalMinters[msg.sender] = true;
     }

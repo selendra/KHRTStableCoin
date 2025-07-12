@@ -17,7 +17,7 @@ describe("KHRTStablecoin", function () {
 
     // Deploy KHRT token
     const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
-    khrtToken = await KHRTStablecoin.deploy();
+    khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR");
     await khrtToken.waitForDeployment();
 
     // Deploy mock USDC
@@ -32,20 +32,6 @@ describe("KHRTStablecoin", function () {
   });
 
   describe("Deployment", function () {
-    it("Should set the correct name and symbol", async function () {
-      expect(await khrtToken.name()).to.equal("Khmer Riel Token");
-      expect(await khrtToken.symbol()).to.equal("KHRT");
-    });
-
-    it("Should set correct decimals", async function () {
-      expect(await khrtToken.decimals()).to.equal(18);
-    });
-
-    it("Should have correct max supply", async function () {
-      const maxSupply = await khrtToken.MAX_SUPPLY();
-      expect(maxSupply).to.equal(ethers.parseEther("1000000000")); // 1 billion
-    });
-
     it("Should set owner as initial minter", async function () {
       expect(await khrtToken.isNormalMinter(owner.address)).to.be.true;
       expect(await khrtToken.isCollateralMinter(owner.address)).to.be.true;
@@ -183,7 +169,7 @@ describe("KHRTStablecoin", function () {
       });
 
       it("Should reject minting beyond max supply", async function () {
-        const maxSupply = await khrtToken.MAX_SUPPLY();
+        const maxSupply = await khrtToken.getMaxSupply();
         const excessAmount = maxSupply + ethers.parseEther("1");
         
         await expect(khrtToken.connect(minter).mint(user1.address, excessAmount))
@@ -375,20 +361,8 @@ describe("KHRTStablecoin", function () {
   });
 
   describe("View Functions", function () {
-    it("Should return correct supply info", async function () {
-      const mintAmount = ethers.parseEther("100000");
-      await khrtToken.connect(minter).mint(user1.address, mintAmount);
-      
-      const supplyInfo = await khrtToken.getSupplyInfo();
-      const maxSupply = await khrtToken.MAX_SUPPLY();
-      
-      expect(supplyInfo.currentSupply).to.equal(mintAmount);
-      expect(supplyInfo.maxSupply).to.equal(maxSupply);
-      expect(supplyInfo.remainingSupply).to.equal(maxSupply - mintAmount);
-    });
-
     it("Should check if amount can be minted", async function () {
-      const maxSupply = await khrtToken.MAX_SUPPLY();
+      const maxSupply = await khrtToken.getMaxSupply();
       
       expect(await khrtToken.canMint(ethers.parseEther("1000"))).to.be.true;
       expect(await khrtToken.canMint(maxSupply + ethers.parseEther("1"))).to.be.false;

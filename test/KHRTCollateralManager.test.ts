@@ -24,7 +24,7 @@ const KHRT_DECIMALS = 18;
 
     // Deploy KHRT token
     const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
-    khrtToken = await KHRTStablecoin.deploy();
+    khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR");
     await khrtToken.waitForDeployment();
 
     // Deploy collateral manager

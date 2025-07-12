@@ -28,7 +28,7 @@ describe("KHRT System Integration Tests", function () {
 
     // Deploy all contracts
     const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
-    khrtToken = await KHRTStablecoin.deploy();
+    khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR");
     await khrtToken.waitForDeployment();
 
     const KHRTCollateralManager = await ethers.getContractFactory("KHRTCollateralManager");
@@ -208,7 +208,7 @@ describe("KHRT System Integration Tests", function () {
 
     it("Should handle maximum supply scenarios", async function () {
       // Try to mint close to max supply
-      const maxSupply = await khrtToken.MAX_SUPPLY();
+      const maxSupply = await khrtToken.getMaxSupply();
       const largeAmount = maxSupply / 2n; // Half of max supply
 
       // Calculate required collateral
