@@ -9,11 +9,11 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     
     // Constants
-    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 1e18; // 1 billion KHRT max supply
     uint256 public constant MIN_MINT_AMOUNT = 1e18; // 1 KHRT minimum mint
     uint256 public constant MIN_BURN_AMOUNT = 1e18; // 1 KHRT minimum burn
     
     // State variables
+    uint256 public maxSupply = 1_000_000_000 * 1e18; // 1 billion KHRT initial max supply
     mapping(address => bool) public whitelistedTokens;
     mapping(address => bool) public collateralMinters;
     mapping(address => bool) public normalMinters;
@@ -28,6 +28,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     event TokensMinted(address indexed to, uint256 amount);
     event TokensBurned(address indexed from, uint256 amount);
     event TokensBurnedFrom(address indexed owner, address indexed burner, uint256 amount);
+    event MaxSupplyIncreased(uint256 oldMaxSupply, uint256 newMaxSupply, address indexed increasedBy);
 
     constructor() ERC20("Khmer Riel Token", "KHRT") Ownable(msg.sender) {
         collateralMinters[msg.sender] = true;
@@ -46,7 +47,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
 
     modifier checkSupplyLimit(uint256 amount) {
-        require(totalSupply() + amount <= MAX_SUPPLY, "KHRT: Exceeds maximum supply");
+        require(totalSupply() + amount <= maxSupply, "KHRT: Exceeds maximum supply");
         _;
     }
 
@@ -58,6 +59,28 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     modifier neitherBlacklisted(address addr1, address addr2) {
         require(!blacklistedUsers[addr1] && !blacklistedUsers[addr2], "KHRT: Address is blacklisted");
         _;
+    }
+
+    /**
+     * @dev Increase the maximum supply of KHRT tokens - only callable by owner
+     * @param additionalSupply Amount to increase the max supply by
+     */
+    function increaseMaxSupply(uint256 additionalSupply) external onlyOwner validAmount(additionalSupply) {
+        uint256 oldMaxSupply = maxSupply;
+        uint256 newMaxSupply = oldMaxSupply + additionalSupply;
+        
+        // Check for overflow
+        require(newMaxSupply > oldMaxSupply, "KHRT: Max supply overflow");
+        
+        maxSupply = newMaxSupply;
+        emit MaxSupplyIncreased(oldMaxSupply, newMaxSupply, msg.sender);
+    }
+
+    /**
+     * @dev Get the current maximum supply
+     */
+    function getMaxSupply() external view returns (uint256) {
+        return maxSupply;
     }
 
     /**
@@ -251,24 +274,11 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Get basic supply information
-     */
-    function getSupplyInfo() external view returns (
-        uint256 currentSupply,
-        uint256 maxSupply,
-        uint256 remainingSupply
-    ) {
-        currentSupply = totalSupply();
-        maxSupply = MAX_SUPPLY;
-        remainingSupply = MAX_SUPPLY - currentSupply;
-    }
-
-    /**
      * @dev Check if an amount can be minted (within supply limits)
      * @param amount Amount to check
      */
     function canMint(uint256 amount) external view returns (bool) {
-        return totalSupply() + amount <= MAX_SUPPLY;
+        return totalSupply() + amount <= maxSupply;
     }
 
     /**
