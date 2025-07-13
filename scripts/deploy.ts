@@ -14,7 +14,7 @@ async function main() {
   console.log("Using gas price:", gasPrice ? ethers.formatUnits(gasPrice, "gwei") + " gwei" : "auto");
 
   // Deploy KHRT Stablecoin first
-  console.log("\n=== Deploying KHRT Stablecoin ===");
+  console.log("\n=== Deploying KHRT Stablecoin (6 decimals) ===");
   const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
   const khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR", {
     gasPrice: gasPrice
@@ -95,15 +95,16 @@ async function main() {
     // Set collateral ratios
     console.log("\nSetting collateral ratios...");
     
-    // For USDC (6 decimals): 1 USDC = 1 KHRT
-    // USDC has 6 decimals, KHRT has 18 decimals
-    // To get 1 USDC (1e6) = 1 KHRT (1e18), ratio needs to be 1e12
-    const usdcRatio = ethers.parseUnits("1", 12); // 1e12
+    // For USDC (6 decimals) to KHRT (6 decimals): 1 USDC = 1 KHRT
+    // Both have same decimals, so ratio is simply 1
+    const usdcRatio = 1n;
     
-    // For STAR (18 decimals): 1 STAR = 40 KHRT (based on 100 STAR = 4000 KHRT)
-    // STAR has 18 decimals, KHRT has 18 decimals
-    // To get 1 STAR (1e18) = 40 KHRT (40e18), ratio needs to be 40
-    const starRatio = 40n; // Simple integer 40
+    // For STAR (18 decimals) to KHRT (6 decimals): 1 STAR = 40 KHRT
+    // STAR has 12 more decimals than KHRT (18-6=12)
+    // To get 1 STAR (1e18) = 40 KHRT (40e6), we need: 40e6 / 1e18 = 40 / 1e12
+    // Since we can't use decimals in Solidity, we express this as: amount * ratio / 1e12 = khrt_amount
+    // So: 1e18 * ratio / 1e12 = 40e6 => ratio = 40e6 * 1e12 / 1e18 = 40
+    const starRatio = 40n;
     
     await (await collateralManager.setCollateralRatio(mockUSDCAddress, usdcRatio, {
       gasPrice: gasPrice
@@ -155,9 +156,9 @@ async function main() {
     const khrtFromHundredSTAR = await collateralManager.calculateMintAmount(mockSTARAddress, hundredSTAR);
     
     console.log("\n=== Minting Calculations ===");
-    console.log("1 USDC would mint:", ethers.formatEther(khrtFromOneUSDC), "KHRT");
-    console.log("1 STAR would mint:", ethers.formatEther(khrtFromOneSTAR), "KHRT");
-    console.log("100 STAR would mint:", ethers.formatEther(khrtFromHundredSTAR), "KHRT");
+    console.log("1 USDC would mint:", ethers.formatUnits(khrtFromOneUSDC, 6), "KHRT");
+    console.log("1 STAR would mint:", ethers.formatUnits(khrtFromOneSTAR, 6), "KHRT");
+    console.log("100 STAR would mint:", ethers.formatUnits(khrtFromHundredSTAR, 6), "KHRT");
 
     console.log("\n=== Mock Token Addresses ===");
     console.log("Mock USDC:", mockUSDCAddress);
@@ -177,7 +178,7 @@ async function main() {
   console.log("- Name:", name);
   console.log("- Symbol:", symbol);
   console.log("- Decimals:", decimals);
-  console.log("- Max Supply:", ethers.formatEther(maxSupply));
+  console.log("- Max Supply:", ethers.formatUnits(maxSupply, 6));
 
   // Check collateral manager details
   const isAuthorized = await khrtToken.isCollateralMinter(collateralManagerAddress);
@@ -203,6 +204,7 @@ async function main() {
       KHRTCollateralManager: collateralManagerAddress,
     },
     deployer: deployer.address,
+    khrtDecimals: 6,
     collateralRatios: {
       USDC: "1:1 (1 USDC = 1 KHRT)",
       STAR: "1:40 (1 STAR = 40 KHRT, 100 STAR = 4000 KHRT)"

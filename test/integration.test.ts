@@ -17,11 +17,11 @@ describe("KHRT System Integration Tests", function () {
   const USDC_DECIMALS = 6;
   const USDT_DECIMALS = 6;
   const WETH_DECIMALS = 18;
-  const KHRT_DECIMALS = 18;
+  const KHRT_DECIMALS = 6;
   
-  // Collateral ratios
-  const STABLECOIN_RATIO = ethers.parseUnits("1", 12); // 1:1 ratio for stablecoins
-  const WETH_RATIO = 2000; // 1 ETH = 2000 KHRT (assuming $2000 ETH)
+  // Collateral ratios (KHRT per 1 token)
+  const STABLECOIN_RATIO = 1; // 1 USDC/USDT = 1 KHRT
+  const WETH_RATIO = 2000; // 1 ETH = 2000 KHRT
   
   beforeEach(async function () {
     [owner, user1, user2, user3] = await ethers.getSigners();
@@ -59,7 +59,7 @@ describe("KHRT System Integration Tests", function () {
     await khrtToken.setTokenWhitelist(await mockUSDT.getAddress(), true);
     await khrtToken.setTokenWhitelist(await mockWETH.getAddress(), true);
 
-    // Set collateral ratios
+    // Set collateral ratios using the new decimal-aware function
     await collateralManager.setCollateralRatio(await mockUSDC.getAddress(), STABLECOIN_RATIO);
     await collateralManager.setCollateralRatio(await mockUSDT.getAddress(), STABLECOIN_RATIO);
     await collateralManager.setCollateralRatio(await mockWETH.getAddress(), WETH_RATIO);
@@ -76,11 +76,13 @@ describe("KHRT System Integration Tests", function () {
   }
 
   describe("Complete User Journey", function () {
-   it("Should allow complete deposit-withdraw cycle with multiple collaterals", async function () {
-      const usdcAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+    it("Should allow complete deposit-withdraw cycle with multiple collaterals", async function () {
+      const usdcAmount = ethers.parseUnits("1000", USDC_DECIMALS); // 1000 USDC
       const ethAmount = ethers.parseUnits("1", WETH_DECIMALS); // 1 ETH
-      const expectedKHRTFromUSDC = ethers.parseUnits("1000", KHRT_DECIMALS);
-      const expectedKHRTFromETH = ethers.parseUnits("2000", KHRT_DECIMALS); // 1 ETH * 2000 ratio
+      
+      // Expected KHRT amounts based on ratios and decimal handling
+      const expectedKHRTFromUSDC = ethers.parseUnits("1000", KHRT_DECIMALS); // 1000 USDC * 1 = 1000 KHRT
+      const expectedKHRTFromETH = ethers.parseUnits("2000", KHRT_DECIMALS); // 1 ETH * 2000 = 2000 KHRT
 
       // === DEPOSIT PHASE ===
       
@@ -88,13 +90,16 @@ describe("KHRT System Integration Tests", function () {
       await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), usdcAmount);
       await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), usdcAmount);
 
+      // Check USDC deposit result
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(expectedKHRTFromUSDC);
+
       // Deposit WETH
       await mockWETH.connect(user1).approve(await collateralManager.getAddress(), ethAmount);
       await collateralManager.connect(user1).depositCollateral(await mockWETH.getAddress(), ethAmount);
 
-      // Check total KHRT balance
-      const totalKHRT = expectedKHRTFromUSDC + expectedKHRTFromETH;
-      expect(await khrtToken.balanceOf(user1.address)).to.equal(totalKHRT);
+      // Check total KHRT balance after both deposits
+      const totalExpectedKHRT = expectedKHRTFromUSDC + expectedKHRTFromETH;
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(totalExpectedKHRT);
 
       // === TRANSFER PHASE ===
       
@@ -110,18 +115,18 @@ describe("KHRT System Integration Tests", function () {
       await khrtToken.connect(user1).approve(await collateralManager.getAddress(), partialWithdraw);
       await collateralManager.connect(user1).withdrawCollateral(await mockUSDC.getAddress(), partialWithdraw);
 
-      // Check remaining position
+      // Check remaining USDC position
       const usdcPosition = await collateralManager.getUserPosition(user1.address, await mockUSDC.getAddress());
       expect(usdcPosition.mintedAmount).to.equal(ethers.parseUnits("500", KHRT_DECIMALS));
       expect(usdcPosition.collateralBalance).to.equal(ethers.parseUnits("500", USDC_DECIMALS));
 
-      // === FINAL BALANCE CHECK (REMOVED COMPLETE WITHDRAWAL) ===
+      // === FINAL BALANCE CHECK ===
       
       // User1 should have: 3000 - 500 (transfer) - 500 (withdrawal) = 2000 KHRT remaining
       const remainingKHRT = await khrtToken.balanceOf(user1.address);
       expect(remainingKHRT).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
       
-      // Verify positions are still active
+      // Verify WETH position is still active
       const wethPosition = await collateralManager.getUserPosition(user1.address, await mockWETH.getAddress());
       expect(wethPosition.mintedAmount).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
       expect(wethPosition.collateralBalance).to.equal(ethAmount);
@@ -152,32 +157,29 @@ describe("KHRT System Integration Tests", function () {
       await collateralManager.connect(user3).depositCollateral(await mockWETH.getAddress(), user3ETHAmount);
 
       // Check individual balances
-      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("500", KHRT_DECIMALS));
-      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
-      expect(await khrtToken.balanceOf(user3.address)).to.equal(ethers.parseUnits("1200", KHRT_DECIMALS));
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("500", KHRT_DECIMALS)); // 500 USDC * 1
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS)); // 1 ETH * 2000
+      expect(await khrtToken.balanceOf(user3.address)).to.equal(ethers.parseUnits("1200", KHRT_DECIMALS)); // 200 USDT * 1 + 0.5 ETH * 2000
 
       // Check total supply
       const totalExpected = ethers.parseUnits("3700", KHRT_DECIMALS);
       expect(await khrtToken.totalSupply()).to.equal(totalExpected);
 
-      // === FIXED TRANSFER LOGIC ===
+      // === TRANSFER LOGIC ===
       
-      // Cross-transfers between users (smaller amounts to avoid balance issues)
+      // Cross-transfers between users
       await khrtToken.connect(user2).transfer(user1.address, ethers.parseUnits("500", KHRT_DECIMALS)); // User2: 2000->1500, User1: 500->1000
       await khrtToken.connect(user3).transfer(user2.address, ethers.parseUnits("200", KHRT_DECIMALS)); // User3: 1200->1000, User2: 1500->1700
 
-      // Batch transfer from user1 (realistic amounts)
+      // Batch transfer from user1
       const recipients = [user2.address, user3.address];
-      const amounts = [ethers.parseUnits("400", KHRT_DECIMALS), ethers.parseUnits("300", KHRT_DECIMALS)]; // Total: 700 KHRT
+      const amounts = [ethers.parseUnits("400", KHRT_DECIMALS), ethers.parseUnits("300", KHRT_DECIMALS)];
       await khrtToken.connect(user1).batchTransfer(recipients, amounts);
 
       // Verify final balances after transfers
-      // User1: 1000 - 700 = 300
-      // User2: 1700 + 400 = 2100  
-      // User3: 1000 + 300 = 1300
-      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("300", KHRT_DECIMALS));
-      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2100", KHRT_DECIMALS));
-      expect(await khrtToken.balanceOf(user3.address)).to.equal(ethers.parseUnits("1300", KHRT_DECIMALS));
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("300", KHRT_DECIMALS)); // 1000 - 700
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2100", KHRT_DECIMALS)); // 1700 + 400
+      expect(await khrtToken.balanceOf(user3.address)).to.equal(ethers.parseUnits("1300", KHRT_DECIMALS)); // 1000 + 300
       
       // Total supply should remain the same
       expect(await khrtToken.totalSupply()).to.equal(totalExpected);
@@ -194,15 +196,15 @@ describe("KHRT System Integration Tests", function () {
         await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), baseAmount);
         await collateralManager.connect(user1).depositCollateral(usdcAddress, baseAmount);
 
-        // Partial withdrawal
+        // Partial withdrawal (50 KHRT = 50 USDC with 1:1 ratio)
         const withdrawAmount = ethers.parseUnits("50", KHRT_DECIMALS);
         await khrtToken.connect(user1).approve(await collateralManager.getAddress(), withdrawAmount);
         await collateralManager.connect(user1).withdrawCollateral(usdcAddress, withdrawAmount);
       }
 
-      // Final check
+      // Final check - net: 10 * (100 deposit - 50 withdraw) = 500
       const position = await collateralManager.getUserPosition(user1.address, usdcAddress);
-      expect(position.mintedAmount).to.equal(ethers.parseUnits("500", KHRT_DECIMALS)); // 10 * 50 remaining
+      expect(position.mintedAmount).to.equal(ethers.parseUnits("500", KHRT_DECIMALS));
       expect(position.collateralBalance).to.equal(ethers.parseUnits("500", USDC_DECIMALS));
     });
 
@@ -211,8 +213,8 @@ describe("KHRT System Integration Tests", function () {
       const maxSupply = await khrtToken.getMaxSupply();
       const largeAmount = maxSupply / 2n; // Half of max supply
 
-      // Calculate required collateral
-      const requiredUSDC = largeAmount / ethers.parseUnits("1", 12); // Adjust for ratio
+      // Calculate required collateral (1:1 ratio for USDC with same decimals)
+      const requiredUSDC = largeAmount;
 
       // Mint enough USDC
       await mockUSDC.mint(user1.address, requiredUSDC);
@@ -224,8 +226,8 @@ describe("KHRT System Integration Tests", function () {
       expect(await khrtToken.balanceOf(user1.address)).to.equal(largeAmount);
 
       // Try to mint more than max supply should fail
-      const excessAmount = maxSupply - largeAmount + ethers.parseUnits("1", 18);
-      const excessUSDC = excessAmount / ethers.parseUnits("1", 12);
+      const excessAmount = maxSupply - largeAmount + ethers.parseUnits("1", KHRT_DECIMALS);
+      const excessUSDC = excessAmount; // 1:1 ratio
       
       await mockUSDC.mint(user2.address, excessUSDC);
       await mockUSDC.connect(user2).approve(await collateralManager.getAddress(), excessUSDC);
@@ -238,13 +240,13 @@ describe("KHRT System Integration Tests", function () {
   describe("Security and Edge Cases", function () {
     it("Should prevent unauthorized minting", async function () {
       // Try to mint directly without being authorized
-      await expect(khrtToken.connect(user1).mint(user1.address, ethers.parseUnits("1000", 18)))
+      await expect(khrtToken.connect(user1).mint(user1.address, ethers.parseUnits("1000", KHRT_DECIMALS)))
         .to.be.revertedWith("KHRT: Unauthorized normal minter");
 
       // Try collateral minting without authorization
       await expect(khrtToken.connect(user1).mintWithCollateral(
         user1.address, 
-        ethers.parseUnits("1000", 18), 
+        ethers.parseUnits("1000", KHRT_DECIMALS), 
         await mockUSDC.getAddress()
       )).to.be.revertedWith("KHRT: Unauthorized collateral minter");
     });
@@ -259,16 +261,16 @@ describe("KHRT System Integration Tests", function () {
       await khrtToken.setUserBlacklist(user1.address, true);
 
       // Should not be able to transfer
-      await expect(khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", 18)))
+      await expect(khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS)))
         .to.be.revertedWith("KHRT: Address is blacklisted");
 
       // Should not be able to receive transfers
-      await expect(khrtToken.connect(user2).transfer(user1.address, ethers.parseUnits("100", 18)))
+      await expect(khrtToken.connect(user2).transfer(user1.address, ethers.parseUnits("100", KHRT_DECIMALS)))
         .to.be.revertedWith("KHRT: Address is blacklisted");
 
       // Remove from blacklist and operations should work
       await khrtToken.setUserBlacklist(user1.address, false);
-      await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", 18));
+      await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS));
     });
 
     it("Should handle paused system correctly", async function () {
@@ -282,7 +284,7 @@ describe("KHRT System Integration Tests", function () {
       await collateralManager.pause();
 
       // Should reject all operations
-      await expect(khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", 18)))
+      await expect(khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS)))
         .to.be.revertedWithCustomError(khrtToken, "EnforcedPause");
 
       await expect(collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), depositAmount))
@@ -292,31 +294,78 @@ describe("KHRT System Integration Tests", function () {
       await khrtToken.unpause();
       await collateralManager.unpause();
 
-      await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", 18));
+      await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS));
     });
 
-   it("Should handle token ratio changes correctly", async function () {
+    it("Should handle token ratio changes correctly", async function () {
       // Initial deposit with ratio 1:1
       const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
       await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), depositAmount);
       await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), depositAmount);
 
-      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000", 18));
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000", KHRT_DECIMALS));
 
-      // Change ratio to 2:1 (multiply by 2e12 instead of 1e12)
-      const newRatio = ethers.parseUnits("2", 12);
+      // Change ratio to 2:1 (1 USDC = 2 KHRT)
+      const newRatio = 2;
       await collateralManager.setCollateralRatio(await mockUSDC.getAddress(), newRatio);
 
       // New deposits should use new ratio
       await mockUSDC.connect(user2).approve(await collateralManager.getAddress(), depositAmount);
       await collateralManager.connect(user2).depositCollateral(await mockUSDC.getAddress(), depositAmount);
 
-      // FIXED EXPECTATION: 1000 USDC * 2e12 = 2000 KHRT (not 500)
-      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2000", 18));
+      // 1000 USDC * 2 = 2000 KHRT
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
 
       // Existing positions should still work with their original terms
       const user1Position = await collateralManager.getUserPosition(user1.address, await mockUSDC.getAddress());
-      expect(user1Position.mintedAmount).to.equal(ethers.parseUnits("1000", 18));
+      expect(user1Position.mintedAmount).to.equal(ethers.parseUnits("1000", KHRT_DECIMALS));
+    });
+  });
+
+  describe("Decimal Precision Tests", function () {
+    it("Should handle different token decimals correctly", async function () {
+      // Test USDC (6 decimals) -> KHRT (6 decimals) with 1:1 ratio
+      const usdcAmount = ethers.parseUnits("1000.123456", USDC_DECIMALS);
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), usdcAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), usdcAmount);
+      
+      const usdcKHRT = await khrtToken.balanceOf(user1.address);
+      expect(usdcKHRT).to.equal(ethers.parseUnits("1000.123456", KHRT_DECIMALS));
+
+      // Test WETH (18 decimals) -> KHRT (6 decimals) with 2000:1 ratio
+      const wethAmount = ethers.parseUnits("1.123456789012345678", WETH_DECIMALS);
+      await mockWETH.connect(user2).approve(await collateralManager.getAddress(), wethAmount);
+      await collateralManager.connect(user2).depositCollateral(await mockWETH.getAddress(), wethAmount);
+      
+      // Expected: 1.123456789012345678 * 2000 = 2246.913578024691356 KHRT
+      // But KHRT only has 6 decimals, so it should be 2246.913578 KHRT
+      const expectedWethKHRT = ethers.parseUnits("2246.913578", KHRT_DECIMALS);
+      const wethKHRT = await khrtToken.balanceOf(user2.address);
+      expect(wethKHRT).to.equal(expectedWethKHRT);
+    });
+
+    it("Should handle withdrawal calculations with precision", async function () {
+      // Deposit WETH and test withdrawal precision
+      const wethAmount = ethers.parseUnits("1.5", WETH_DECIMALS);
+      await mockWETH.connect(user1).approve(await collateralManager.getAddress(), wethAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockWETH.getAddress(), wethAmount);
+
+      const khrtBalance = await khrtToken.balanceOf(user1.address);
+      expect(khrtBalance).to.equal(ethers.parseUnits("3000", KHRT_DECIMALS)); // 1.5 * 2000
+
+      // Withdraw half the KHRT
+      const withdrawAmount = ethers.parseUnits("1500", KHRT_DECIMALS);
+      await khrtToken.connect(user1).approve(await collateralManager.getAddress(), withdrawAmount);
+      await collateralManager.connect(user1).withdrawCollateral(await mockWETH.getAddress(), withdrawAmount);
+
+      // Should get back 0.75 ETH (1500 KHRT / 2000 ratio)
+      const wethBalance = await mockWETH.balanceOf(user1.address);
+      const expectedWethBack = ethers.parseUnits("0.75", WETH_DECIMALS);
+      
+      // Account for initial balance minus deposited amount plus withdrawn amount
+      const initialWethBalance = ethers.parseUnits("100", WETH_DECIMALS); // from setup
+      const expectedFinalBalance = initialWethBalance - wethAmount + expectedWethBack;
+      expect(wethBalance).to.equal(expectedFinalBalance);
     });
   });
 
@@ -334,28 +383,28 @@ describe("KHRT System Integration Tests", function () {
       console.log("Deposit gas used:", depositReceipt?.gasUsed?.toString());
 
       // Measure gas for withdrawal
-      await khrtToken.connect(user1).approve(await collateralManager.getAddress(), ethers.parseUnits("500", 18));
-      const withdrawTx = await collateralManager.connect(user1).withdrawCollateral(usdcAddress, ethers.parseUnits("500", 18));
+      await khrtToken.connect(user1).approve(await collateralManager.getAddress(), ethers.parseUnits("500", KHRT_DECIMALS));
+      const withdrawTx = await collateralManager.connect(user1).withdrawCollateral(usdcAddress, ethers.parseUnits("500", KHRT_DECIMALS));
       const withdrawReceipt = await withdrawTx.wait();
       console.log("Withdrawal gas used:", withdrawReceipt?.gasUsed?.toString());
 
       // Measure gas for transfer
-      const transferTx = await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", 18));
+      const transferTx = await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS));
       const transferReceipt = await transferTx.wait();
       console.log("Transfer gas used:", transferReceipt?.gasUsed?.toString());
     });
 
     it("Should handle batch operations efficiently", async function () {
       // Setup initial balance
-      const mintAmount = ethers.parseUnits("10000", 18);
+      const mintAmount = ethers.parseUnits("10000", KHRT_DECIMALS);
       await khrtToken.connect(owner).mint(user1.address, mintAmount);
 
       // Batch transfer to multiple recipients
       const recipients = [user2.address, user3.address, owner.address];
       const amounts = [
-        ethers.parseUnits("1000", 18),
-        ethers.parseUnits("2000", 18),
-        ethers.parseUnits("1500", 18)
+        ethers.parseUnits("1000", KHRT_DECIMALS),
+        ethers.parseUnits("2000", KHRT_DECIMALS),
+        ethers.parseUnits("1500", KHRT_DECIMALS)
       ];
 
       const batchTx = await khrtToken.connect(user1).batchTransfer(recipients, amounts);
@@ -392,7 +441,7 @@ describe("KHRT System Integration Tests", function () {
       expect(await khrtToken.balanceOf(user1.address)).to.equal(khrtBalance - lendingAmount);
 
       // Later, user gets tokens back with interest (simulate repayment)
-      const interest = ethers.parseUnits("50", 18);
+      const interest = ethers.parseUnits("50", KHRT_DECIMALS);
       await khrtToken.connect(owner).mint(user2.address, interest); // Mint interest
       await khrtToken.connect(user2).transfer(user1.address, lendingAmount + interest);
 
@@ -410,10 +459,10 @@ describe("KHRT System Integration Tests", function () {
       await collateralManager.connect(user1).depositCollateral(wethAddress, ethAmount);
 
       const initialKHRT = await khrtToken.balanceOf(user1.address);
-      expect(initialKHRT).to.equal(ethers.parseUnits("2000", 18));
+      expect(initialKHRT).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
 
       // Simulate ETH price increase to $3000 by updating ratio for new deposits
-      const newRatio = 3000; // FIXED: just 3000, not ethers.parseUnits("3000", 18)
+      const newRatio = 3000;
       await collateralManager.setCollateralRatio(wethAddress, newRatio);
 
       // New deposits should get more KHRT
@@ -421,11 +470,11 @@ describe("KHRT System Integration Tests", function () {
       await collateralManager.connect(user2).depositCollateral(wethAddress, ethAmount);
 
       const user2KHRT = await khrtToken.balanceOf(user2.address);
-      expect(user2KHRT).to.equal(ethers.parseUnits("3000", 18));
+      expect(user2KHRT).to.equal(ethers.parseUnits("3000", KHRT_DECIMALS));
 
       // Existing positions maintain their ratios
       const user1Position = await collateralManager.getUserPosition(user1.address, wethAddress);
-      expect(user1Position.mintedAmount).to.equal(ethers.parseUnits("2000", 18));
+      expect(user1Position.mintedAmount).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
     });
   });
 });

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
@@ -12,6 +13,7 @@ interface IKHRTStablecoin {
     function burnFrom(address owner, uint256 amount) external;
     function isTokenWhitelisted(address token) external view returns (bool);
     function isCollateralMinter(address minter) external view returns (bool);
+    function decimals() external view returns (uint8);
 }
 
 contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
@@ -22,7 +24,11 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     // Minimum collateral ratio (100% = 10000 basis points)
     uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
     
-    // Collateral token address => ratio (conversion factor from collateral to KHRT)
+    // Scaling factor for ratio precision (18 decimals)
+    uint256 public constant RATIO_PRECISION = 1e18;
+    
+    // Collateral token address => ratio (KHRT amount per 1 collateral token, scaled by RATIO_PRECISION)
+    // Example: 1 USDT = 4000 KHRT would be stored as 4000 * 1e18
     mapping(address => uint256) public collateralRatios;
     
     // User address => collateral token => deposited amount
@@ -48,15 +54,66 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     /**
      * @dev Set collateral ratio for a token
      * @param token Address of the collateral token
-     * @param ratio Conversion factor from collateral amount to KHRT amount
+     * @param khrtPerToken How many KHRT tokens are minted per 1 unit of collateral token
+     * Example: setCollateralRatio(USDT, 4000) for 1 USDT = 4000 KHRT
+     * Example: setCollateralRatio(ETH, 8000000) for 1 ETH = 8,000,000 KHRT
      */
-    function setCollateralRatio(address token, uint256 ratio) external onlyOwner {
+    function setCollateralRatio(address token, uint256 khrtPerToken) external onlyOwner {
         require(token != address(0), "CollateralManager: Invalid token address");
-        require(ratio > 0, "CollateralManager: Ratio must be greater than 0");
+        require(khrtPerToken > 0, "CollateralManager: Ratio must be greater than 0");
         require(khrtToken.isTokenWhitelisted(token), "CollateralManager: Token not whitelisted in KHRT");
         
-        collateralRatios[token] = ratio;
-        emit CollateralRatioSet(token, ratio);
+        // Store the ratio scaled by precision factor
+        collateralRatios[token] = khrtPerToken * RATIO_PRECISION;
+        emit CollateralRatioSet(token, khrtPerToken);
+    }
+
+    /**
+     * @dev Get token decimals, with fallback to 18 if not available
+     */
+    function getTokenDecimals(address token) public view returns (uint8) {
+        try IERC20Metadata(token).decimals() returns (uint8 decimals) {
+            return decimals;
+        } catch {
+            return 18; // Default fallback
+        }
+    }
+
+    /**
+     * @dev Calculate KHRT amount to mint based on collateral amount and ratio
+     * @param token Address of the collateral token
+     * @param collateralAmount Amount of collateral tokens (in token's native decimals)
+     * @return khrtAmount Amount of KHRT to mint (in KHRT's native decimals)
+     */
+    function calculateKHRTAmount(address token, uint256 collateralAmount) public view returns (uint256 khrtAmount) {
+        if (collateralRatios[token] == 0) return 0;
+        
+        uint8 collateralDecimals = getTokenDecimals(token);
+        uint8 khrtDecimals = khrtToken.decimals();
+        
+        // Formula: khrtAmount = (collateralAmount * ratio * 10^khrtDecimals) / (RATIO_PRECISION * 10^collateralDecimals)
+        khrtAmount = (collateralAmount * collateralRatios[token] * (10 ** khrtDecimals)) / 
+                     (RATIO_PRECISION * (10 ** collateralDecimals));
+    }
+
+    /**
+     * @dev Calculate collateral amount needed for given KHRT amount
+     * @param token Address of the collateral token
+     * @param khrtAmount Amount of KHRT tokens (in KHRT's native decimals)
+     * @return collateralAmount Amount of collateral needed (in token's native decimals)
+     */
+    function calculateCollateralAmount(address token, uint256 khrtAmount) public view returns (uint256 collateralAmount) {
+        if (collateralRatios[token] == 0) return 0;
+        
+        uint8 collateralDecimals = getTokenDecimals(token);
+        uint8 khrtDecimals = khrtToken.decimals();
+        
+        // Formula: collateralAmount = (khrtAmount * RATIO_PRECISION * 10^collateralDecimals) / (ratio * 10^khrtDecimals)
+        // Use ceiling division to ensure sufficient collateral
+        uint256 numerator = khrtAmount * RATIO_PRECISION * (10 ** collateralDecimals);
+        uint256 denominator = collateralRatios[token] * (10 ** khrtDecimals);
+        
+        collateralAmount = (numerator + denominator - 1) / denominator; // Ceiling division
     }
 
     /**
@@ -71,8 +128,8 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         require(khrtToken.isTokenWhitelisted(token), "CollateralManager: Token not whitelisted");
         require(khrtToken.isCollateralMinter(address(this)), "CollateralManager: Not authorized as collateral minter");
 
-        // Calculate KHRT amount to mint based on ratio
-        uint256 khrtAmount = amount * collateralRatios[token];
+        // Calculate KHRT amount to mint based on ratio and decimals
+        uint256 khrtAmount = calculateKHRTAmount(token, amount);
         require(khrtAmount > 0, "CollateralManager: Insufficient collateral for minimum mint");
 
         // Transfer collateral from user
@@ -100,15 +157,8 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         require(collateralRatios[token] > 0, "CollateralManager: Token ratio not set");
         require(userMintedAmounts[msg.sender][token] >= khrtAmount, "CollateralManager: Insufficient minted amount");
 
-        // SECURITY FIX: Calculate collateral amount with protocol-favorable rounding
-        uint256 collateralAmount = khrtAmount / collateralRatios[token];
-        
-        // SECURITY FIX: Ensure no precision loss favoring user
-        // If division resulted in rounding down, verify the user isn't getting more value than they should
-        require(
-            collateralAmount * collateralRatios[token] >= khrtAmount,
-            "CollateralManager: Precision calculation error"
-        );
+        // Calculate collateral amount with protocol-favorable rounding
+        uint256 collateralAmount = calculateCollateralAmount(token, khrtAmount);
         
         require(userCollateralBalances[msg.sender][token] >= collateralAmount, "CollateralManager: Insufficient collateral balance");
 
@@ -116,9 +166,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         uint256 remainingMinted = userMintedAmounts[msg.sender][token] - khrtAmount;
         if (remainingMinted > 0) {
             uint256 remainingCollateral = userCollateralBalances[msg.sender][token] - collateralAmount;
-            
-            // SECURITY FIX: Use ceiling division for required collateral (protocol-favorable rounding)
-            uint256 requiredCollateral = (remainingMinted + collateralRatios[token] - 1) / collateralRatios[token];
+            uint256 requiredCollateral = calculateCollateralAmount(token, remainingMinted);
             require(remainingCollateral >= requiredCollateral, "CollateralManager: Would violate minimum collateral ratio");
         }
 
@@ -152,8 +200,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         
         // Calculate current collateral ratio (in basis points, 10000 = 100%)
         if (mintedAmount > 0 && collateralRatios[token] > 0) {
-            // SECURITY FIX: Use ceiling division for required collateral calculation
-            uint256 requiredCollateral = (mintedAmount + collateralRatios[token] - 1) / collateralRatios[token];
+            uint256 requiredCollateral = calculateCollateralAmount(token, mintedAmount);
             if (requiredCollateral > 0) {
                 collateralRatio = (collateralBalance * 10000) / requiredCollateral;
             } else {
@@ -165,11 +212,10 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         
         // Calculate maximum KHRT that can be withdrawn while maintaining minimum ratio
         if (mintedAmount > 0 && collateralBalance > 0 && collateralRatios[token] > 0) {
-            // SECURITY FIX: Use ceiling division for required collateral
-            uint256 requiredCollateral = (mintedAmount + collateralRatios[token] - 1) / collateralRatios[token];
+            uint256 requiredCollateral = calculateCollateralAmount(token, mintedAmount);
             if (collateralBalance > requiredCollateral) {
                 uint256 maxWithdrawableCollateral = collateralBalance - requiredCollateral;
-                maxWithdrawableKHRT = maxWithdrawableCollateral * collateralRatios[token];
+                maxWithdrawableKHRT = calculateKHRTAmount(token, maxWithdrawableCollateral);
             } else {
                 maxWithdrawableKHRT = 0;
             }
@@ -189,8 +235,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         uint256 mintedAmount = userMintedAmounts[user][token];
         
         if (mintedAmount > 0 && collateralRatios[token] > 0) {
-            // SECURITY FIX: Use ceiling division for required collateral calculation
-            uint256 requiredCollateral = (mintedAmount + collateralRatios[token] - 1) / collateralRatios[token];
+            uint256 requiredCollateral = calculateCollateralAmount(token, mintedAmount);
             if (requiredCollateral > 0) {
                 ratio = (collateralBalance * 10000) / requiredCollateral;
             } else {
@@ -212,10 +257,18 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Get collateral ratio for a token
+     * @dev Get collateral ratio for a token (KHRT per 1 token)
      * @param token Address of the collateral token
      */
     function getCollateralRatio(address token) external view returns (uint256) {
+        return collateralRatios[token] / RATIO_PRECISION;
+    }
+
+    /**
+     * @dev Get raw collateral ratio for a token (with precision scaling)
+     * @param token Address of the collateral token
+     */
+    function getRawCollateralRatio(address token) external view returns (uint256) {
         return collateralRatios[token];
     }
 
@@ -225,8 +278,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
      * @param collateralAmount Amount of collateral tokens
      */
     function calculateMintAmount(address token, uint256 collateralAmount) external view returns (uint256) {
-        if (collateralRatios[token] == 0) return 0;
-        return collateralAmount * collateralRatios[token];
+        return calculateKHRTAmount(token, collateralAmount);
     }
 
     /**
@@ -235,8 +287,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
      * @param khrtAmount Amount of KHRT tokens to mint
      */
     function calculateCollateralNeeded(address token, uint256 khrtAmount) external view returns (uint256) {
-        // SECURITY FIX: Use ceiling division to ensure sufficient collateral
-        return (khrtAmount + collateralRatios[token] - 1) / collateralRatios[token];
+        return calculateCollateralAmount(token, khrtAmount);
     }
 
     /**
@@ -253,6 +304,22 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
      */
     function getTotalCollateralDeposited(address token) external view returns (uint256) {
         return totalCollateralDeposited[token];
+    }
+
+    /**
+     * @dev Get token information including decimals and ratio
+     * @param token Address of the collateral token
+     */
+    function getTokenInfo(address token) external view returns (
+        uint8 decimals,
+        uint256 ratio,
+        uint256 totalDeposited,
+        bool isWhitelisted
+    ) {
+        decimals = getTokenDecimals(token);
+        ratio = collateralRatios[token] / RATIO_PRECISION;
+        totalDeposited = totalCollateralDeposited[token];
+        isWhitelisted = khrtToken.isTokenWhitelisted(token);
     }
 
     /**

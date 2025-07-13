@@ -9,11 +9,11 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     
     // Constants
-    uint256 public constant MIN_MINT_AMOUNT = 1e18; // 1 KHRT minimum mint
-    uint256 public constant MIN_BURN_AMOUNT = 1e18; // 1 KHRT minimum burn
+    uint256 public constant MIN_MINT_AMOUNT = 1e6; // 1 KHRT minimum mint (6 decimals)
+    uint256 public constant MIN_BURN_AMOUNT = 1e6; // 1 KHRT minimum burn (6 decimals)
     
     // State variables
-    uint256 public maxSupply = 1_000_000_000 * 1e18;
+    uint256 public maxSupply = 1_000_000_000 * 1e6; // 1B KHRT with 6 decimals
     mapping(address => bool) public whitelistedTokens;
     mapping(address => bool) public collateralMinters;
     mapping(address => bool) public normalMinters;
@@ -33,6 +33,13 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     constructor(string memory name, string memory symbol) ERC20(name, symbol) Ownable(msg.sender) {
         collateralMinters[msg.sender] = true;
         normalMinters[msg.sender] = true;
+    }
+
+    /**
+     * @dev Override decimals to return 6 instead of default 18
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 6;
     }
 
     // Modifiers

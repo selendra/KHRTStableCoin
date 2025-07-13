@@ -14,10 +14,10 @@ describe("KHRTCollateralManager", function () {
 
 const USDC_DECIMALS = 6;
 const USDT_DECIMALS = 6;
-const KHRT_DECIMALS = 18;
+const KHRT_DECIMALS = 6; // Updated to 6 decimals
   
-  // Collateral ratios (for 6-decimal tokens to 18-decimal KHRT)
-  const STABLECOIN_RATIO = ethers.parseUnits("1", 12); // 1e12 (correct for 6->18 decimal conversion)
+  // Collateral ratios (for same-decimal tokens: 6->6)
+  const STABLECOIN_RATIO = 1n; // 1:1 ratio for same decimals
 
   beforeEach(async function () {
     [owner, user1, user2] = await ethers.getSigners();
@@ -74,7 +74,7 @@ const KHRT_DECIMALS = 18;
   describe("Collateral Ratio Management", function () {
     it("Should allow owner to set collateral ratios", async function () {
       const tokenAddress = await mockUSDC.getAddress();
-      const newRatio = ethers.parseUnits("2", 12);
+      const newRatio = 2n; // 2:1 ratio
 
       await expect(collateralManager.setCollateralRatio(tokenAddress, newRatio))
         .to.emit(collateralManager, "CollateralRatioSet")
@@ -373,11 +373,11 @@ const KHRT_DECIMALS = 18;
 
       expect(usdcPosition.collateralBalance).to.equal(depositAmount);
       expect(usdtPosition.collateralBalance).to.equal(depositAmount);
-      expect(usdcPosition.mintedAmount).to.equal(ethers.parseUnits("1000", 18));
-      expect(usdtPosition.mintedAmount).to.equal(ethers.parseUnits("1000", 18));
+      expect(usdcPosition.mintedAmount).to.equal(ethers.parseUnits("1000", 6));
+      expect(usdtPosition.mintedAmount).to.equal(ethers.parseUnits("1000", 6));
 
       // Total KHRT should be 2000
-      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("2000", 18));
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("2000", 6));
     });
 
     it("Should allow independent withdrawals from different collateral types", async function () {
@@ -405,10 +405,10 @@ const KHRT_DECIMALS = 18;
       expect(usdcPosition.collateralBalance).to.equal(0);
       expect(usdcPosition.mintedAmount).to.equal(0);
       expect(usdtPosition.collateralBalance).to.equal(depositAmount);
-      expect(usdtPosition.mintedAmount).to.equal(ethers.parseUnits("1000", 18));
+      expect(usdtPosition.mintedAmount).to.equal(ethers.parseUnits("1000", 6));
       
       // User should have only 1000 KHRT left (from USDT position)
-      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000", 18));
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000", 6));
     });
   });
 
@@ -486,13 +486,13 @@ const KHRT_DECIMALS = 18;
   describe("Edge Cases", function () {
     it("Should handle very small amounts correctly", async function () {
       const tokenAddress = await mockUSDC.getAddress();
-      // Deposit amount that results in exactly 1 KHRT (1e18 wei)
+      // Deposit amount that results in exactly 1 KHRT (1e6 wei)
       const minDeposit = BigInt(1); // 1 wei of USDC
       
       await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), minDeposit);
       
-      // This should fail with "KHRT: Below minimum mint amount" because 1 wei * 1e12 = 1e12 wei KHRT
-      // which is less than MIN_MINT_AMOUNT (1e18)
+      // This should fail with "KHRT: Below minimum mint amount" because 1 wei * 1 = 1 wei KHRT
+      // which is less than MIN_MINT_AMOUNT (1e6)
       await expect(collateralManager.connect(user1).depositCollateral(tokenAddress, minDeposit))
         .to.be.revertedWith("KHRT: Below minimum mint amount");
     });

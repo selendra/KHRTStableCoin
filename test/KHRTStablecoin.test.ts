@@ -40,6 +40,10 @@ describe("KHRTStablecoin", function () {
     it("Should start with zero total supply", async function () {
       expect(await khrtToken.totalSupply()).to.equal(0);
     });
+
+    it("Should have 6 decimals", async function () {
+      expect(await khrtToken.decimals()).to.equal(6);
+    });
   });
 
   describe("Access Control", function () {
@@ -136,7 +140,7 @@ describe("KHRTStablecoin", function () {
   describe("Minting", function () {
     describe("Normal Minting", function () {
       it("Should allow authorized minters to mint tokens", async function () {
-        const mintAmount = ethers.parseEther("1000");
+        const mintAmount = ethers.parseUnits("1000", 6); // 1000 KHRT with 6 decimals
         
         await expect(khrtToken.connect(minter).mint(user1.address, mintAmount))
           .to.emit(khrtToken, "TokensMinted")
@@ -147,14 +151,14 @@ describe("KHRTStablecoin", function () {
       });
 
       it("Should reject minting from unauthorized addresses", async function () {
-        const mintAmount = ethers.parseEther("1000");
+        const mintAmount = ethers.parseUnits("1000", 6);
         
         await expect(khrtToken.connect(user1).mint(user2.address, mintAmount))
           .to.be.revertedWith("KHRT: Unauthorized normal minter");
       });
 
       it("Should reject minting below minimum amount", async function () {
-        const belowMinAmount = ethers.parseEther("0.5"); // Below 1 KHRT minimum
+        const belowMinAmount = ethers.parseUnits("0.5", 6); // Below 1 KHRT minimum
         
         await expect(khrtToken.connect(minter).mint(user1.address, belowMinAmount))
           .to.be.revertedWith("KHRT: Below minimum mint amount");
@@ -162,7 +166,7 @@ describe("KHRTStablecoin", function () {
 
       it("Should reject minting to blacklisted users", async function () {
         await khrtToken.setUserBlacklist(user1.address, true);
-        const mintAmount = ethers.parseEther("1000");
+        const mintAmount = ethers.parseUnits("1000", 6);
         
         await expect(khrtToken.connect(minter).mint(user1.address, mintAmount))
           .to.be.revertedWith("KHRT: Address is blacklisted");
@@ -170,7 +174,7 @@ describe("KHRTStablecoin", function () {
 
       it("Should reject minting beyond max supply", async function () {
         const maxSupply = await khrtToken.getMaxSupply();
-        const excessAmount = maxSupply + ethers.parseEther("1");
+        const excessAmount = maxSupply + ethers.parseUnits("1", 6);
         
         await expect(khrtToken.connect(minter).mint(user1.address, excessAmount))
           .to.be.revertedWith("KHRT: Exceeds maximum supply");
@@ -179,7 +183,7 @@ describe("KHRTStablecoin", function () {
 
     describe("Collateral Minting", function () {
       it("Should allow collateral minters to mint with collateral", async function () {
-        const mintAmount = ethers.parseEther("1000");
+        const mintAmount = ethers.parseUnits("1000", 6);
         const collateralToken = await mockUSDC.getAddress();
         
         await expect(khrtToken.connect(minter).mintWithCollateral(user1.address, mintAmount, collateralToken))
@@ -190,7 +194,7 @@ describe("KHRTStablecoin", function () {
       });
 
       it("Should reject collateral minting with non-whitelisted token", async function () {
-        const mintAmount = ethers.parseEther("1000");
+        const mintAmount = ethers.parseUnits("1000", 6);
         const nonWhitelistedToken = user2.address;
         
         await expect(khrtToken.connect(minter).mintWithCollateral(user1.address, mintAmount, nonWhitelistedToken))
@@ -198,7 +202,7 @@ describe("KHRTStablecoin", function () {
       });
 
       it("Should reject unauthorized collateral minting", async function () {
-        const mintAmount = ethers.parseEther("1000");
+        const mintAmount = ethers.parseUnits("1000", 6);
         const collateralToken = await mockUSDC.getAddress();
         
         await expect(khrtToken.connect(user1).mintWithCollateral(user2.address, mintAmount, collateralToken))
@@ -210,13 +214,13 @@ describe("KHRTStablecoin", function () {
   describe("Burning", function () {
     beforeEach(async function () {
       // Mint some tokens for testing
-      const mintAmount = ethers.parseEther("10000");
+      const mintAmount = ethers.parseUnits("10000", 6);
       await khrtToken.connect(minter).mint(user1.address, mintAmount);
       await khrtToken.connect(minter).mint(user2.address, mintAmount);
     });
 
     it("Should allow users to burn their own tokens", async function () {
-      const burnAmount = ethers.parseEther("1000");
+      const burnAmount = ethers.parseUnits("1000", 6);
       const initialBalance = await khrtToken.balanceOf(user1.address);
       
       await expect(khrtToken.connect(user1).burn(burnAmount))
@@ -227,7 +231,7 @@ describe("KHRTStablecoin", function () {
     });
 
     it("Should allow burning from another address with allowance", async function () {
-      const burnAmount = ethers.parseEther("1000");
+      const burnAmount = ethers.parseUnits("1000", 6);
       
       // Approve user2 to burn user1's tokens
       await khrtToken.connect(user1).approve(user2.address, burnAmount);
@@ -238,7 +242,7 @@ describe("KHRTStablecoin", function () {
     });
 
     it("Should reject burning below minimum amount", async function () {
-      const belowMinAmount = ethers.parseEther("0.5");
+      const belowMinAmount = ethers.parseUnits("0.5", 6);
       
       await expect(khrtToken.connect(user1).burn(belowMinAmount))
         .to.be.revertedWith("KHRT: Below minimum burn amount");
@@ -246,14 +250,14 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject burning more than balance", async function () {
       const balance = await khrtToken.balanceOf(user1.address);
-      const excessAmount = balance + ethers.parseEther("1");
+      const excessAmount = balance + ethers.parseUnits("1", 6);
       
       await expect(khrtToken.connect(user1).burn(excessAmount))
         .to.be.revertedWith("KHRT: Insufficient balance to burn");
     });
 
     it("Should reject burnFrom without sufficient allowance", async function () {
-      const burnAmount = ethers.parseEther("1000");
+      const burnAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(user2).burnFrom(user1.address, burnAmount))
         .to.be.revertedWith("KHRT: Insufficient allowance");
@@ -261,7 +265,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject burning from blacklisted users", async function () {
       await khrtToken.setUserBlacklist(user1.address, true);
-      const burnAmount = ethers.parseEther("1000");
+      const burnAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(user1).burn(burnAmount))
         .to.be.revertedWith("KHRT: Address is blacklisted");
@@ -271,12 +275,12 @@ describe("KHRTStablecoin", function () {
   describe("Transfers", function () {
     beforeEach(async function () {
       // Mint some tokens for testing
-      const mintAmount = ethers.parseEther("10000");
+      const mintAmount = ethers.parseUnits("10000", 6);
       await khrtToken.connect(minter).mint(user1.address, mintAmount);
     });
 
     it("Should allow normal transfers", async function () {
-      const transferAmount = ethers.parseEther("1000");
+      const transferAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(user1).transfer(user2.address, transferAmount))
         .to.emit(khrtToken, "Transfer")
@@ -287,7 +291,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject transfers to blacklisted users", async function () {
       await khrtToken.setUserBlacklist(user2.address, true);
-      const transferAmount = ethers.parseEther("1000");
+      const transferAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(user1).transfer(user2.address, transferAmount))
         .to.be.revertedWith("KHRT: Address is blacklisted");
@@ -295,7 +299,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject transfers from blacklisted users", async function () {
       await khrtToken.setUserBlacklist(user1.address, true);
-      const transferAmount = ethers.parseEther("1000");
+      const transferAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(user1).transfer(user2.address, transferAmount))
         .to.be.revertedWith("KHRT: Address is blacklisted");
@@ -303,7 +307,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should allow batch transfers", async function () {
       const recipients = [user2.address, minter.address];
-      const amounts = [ethers.parseEther("1000"), ethers.parseEther("2000")];
+      const amounts = [ethers.parseUnits("1000", 6), ethers.parseUnits("2000", 6)];
       
       await khrtToken.connect(user1).batchTransfer(recipients, amounts);
       
@@ -313,7 +317,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject batch transfers with mismatched arrays", async function () {
       const recipients = [user2.address];
-      const amounts = [ethers.parseEther("1000"), ethers.parseEther("2000")];
+      const amounts = [ethers.parseUnits("1000", 6), ethers.parseUnits("2000", 6)];
       
       await expect(khrtToken.connect(user1).batchTransfer(recipients, amounts))
         .to.be.revertedWith("KHRT: Arrays length mismatch");
@@ -323,7 +327,7 @@ describe("KHRTStablecoin", function () {
   describe("Pause Functionality", function () {
     beforeEach(async function () {
       // Mint some tokens for testing
-      const mintAmount = ethers.parseEther("10000");
+      const mintAmount = ethers.parseUnits("10000", 6);
       await khrtToken.connect(minter).mint(user1.address, mintAmount);
     });
 
@@ -334,7 +338,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject minting when paused", async function () {
       await khrtToken.pause();
-      const mintAmount = ethers.parseEther("1000");
+      const mintAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(minter).mint(user2.address, mintAmount))
         .to.be.revertedWithCustomError(khrtToken, "EnforcedPause");
@@ -342,7 +346,7 @@ describe("KHRTStablecoin", function () {
 
     it("Should reject transfers when paused", async function () {
       await khrtToken.pause();
-      const transferAmount = ethers.parseEther("1000");
+      const transferAmount = ethers.parseUnits("1000", 6);
       
       await expect(khrtToken.connect(user1).transfer(user2.address, transferAmount))
         .to.be.revertedWithCustomError(khrtToken, "EnforcedPause");
@@ -355,7 +359,7 @@ describe("KHRTStablecoin", function () {
       expect(await khrtToken.paused()).to.be.false;
       
       // Should work after unpausing
-      const transferAmount = ethers.parseEther("1000");
+      const transferAmount = ethers.parseUnits("1000", 6);
       await khrtToken.connect(user1).transfer(user2.address, transferAmount);
     });
   });
@@ -364,8 +368,8 @@ describe("KHRTStablecoin", function () {
     it("Should check if amount can be minted", async function () {
       const maxSupply = await khrtToken.getMaxSupply();
       
-      expect(await khrtToken.canMint(ethers.parseEther("1000"))).to.be.true;
-      expect(await khrtToken.canMint(maxSupply + ethers.parseEther("1"))).to.be.false;
+      expect(await khrtToken.canMint(ethers.parseUnits("1000", 6))).to.be.true;
+      expect(await khrtToken.canMint(maxSupply + ethers.parseUnits("1", 6))).to.be.false;
     });
   });
 
@@ -376,12 +380,12 @@ describe("KHRTStablecoin", function () {
     });
 
     it("Should handle invalid address operations", async function () {
-      await expect(khrtToken.connect(user1).transfer(ethers.ZeroAddress, ethers.parseEther("1000")))
+      await expect(khrtToken.connect(user1).transfer(ethers.ZeroAddress, ethers.parseUnits("1000", 6)))
         .to.be.revertedWith("KHRT: Invalid address");
     });
 
     it("Should handle approvals to zero address", async function () {
-      await expect(khrtToken.connect(user1).approve(ethers.ZeroAddress, ethers.parseEther("1000")))
+      await expect(khrtToken.connect(user1).approve(ethers.ZeroAddress, ethers.parseUnits("1000", 6)))
         .to.be.revertedWith("KHRT: Invalid address");
     });
   });
