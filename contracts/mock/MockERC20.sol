@@ -2,11 +2,21 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract MockERC20 is ERC20 {
+contract MockERC20 is ERC20, Ownable {
     uint8 private _decimals;
     
-    constructor(string memory name, string memory symbol, uint8 decimals_) ERC20(name, symbol) {
+    // Events for batch operations
+    event BatchTransfer(address indexed from, uint256 totalAmount, uint256 recipientCount);
+    event BatchTransferFrom(address indexed spender, address indexed from, uint256 totalAmount, uint256 recipientCount);
+    
+    constructor(
+        string memory name, 
+        string memory symbol, 
+        uint8 decimals_,
+        address initialOwner
+    ) ERC20(name, symbol) Ownable(initialOwner) {
         _decimals = decimals_;
     }
     
@@ -14,11 +24,129 @@ contract MockERC20 is ERC20 {
         return _decimals;
     }
     
-    function mint(address to, uint256 amount) external {
+    function mint(address to, uint256 amount) external onlyOwner {
         _mint(to, amount);
     }
     
-    function burn(address from, uint256 amount) external {
+    function burn(address from, uint256 amount) external onlyOwner {
         _burn(from, amount);
+    }
+    
+    /**
+     * @dev Batch transfer tokens to multiple recipients
+     * @param recipients Array of recipient addresses
+     * @param amounts Array of amounts to transfer to each recipient
+     * @return success True if all transfers succeeded
+     */
+    function batchTransfer(
+        address[] calldata recipients, 
+        uint256[] calldata amounts
+    ) external returns (bool success) {
+        require(recipients.length == amounts.length, "Arrays length mismatch");
+        require(recipients.length > 0, "Empty arrays");
+        require(recipients.length <= 200, "Too many recipients"); // Gas limit protection
+        
+        uint256 totalAmount = 0;
+        
+        // Calculate total amount and validate recipients
+        for (uint256 i = 0; i < recipients.length; i++) {
+            require(recipients[i] != address(0), "Invalid recipient");
+            require(amounts[i] > 0, "Invalid amount");
+            totalAmount += amounts[i];
+        }
+        
+        // Check sender has sufficient balance
+        require(balanceOf(msg.sender) >= totalAmount, "Insufficient balance");
+        
+        // Perform transfers
+        for (uint256 i = 0; i < recipients.length; i++) {
+            _transfer(msg.sender, recipients[i], amounts[i]);
+        }
+        
+        emit BatchTransfer(msg.sender, totalAmount, recipients.length);
+        return true;
+    }
+    
+    /**
+     * @dev Batch transfer tokens from another account to multiple recipients
+     * @param from Address to transfer from
+     * @param recipients Array of recipient addresses  
+     * @param amounts Array of amounts to transfer to each recipient
+     * @return success True if all transfers succeeded
+     */
+    function batchTransferFrom(
+        address from,
+        address[] calldata recipients,
+        uint256[] calldata amounts
+    ) external returns (bool success) {
+        require(recipients.length == amounts.length, "Arrays length mismatch");
+        require(recipients.length > 0, "Empty arrays");
+        require(recipients.length <= 200, "Too many recipients"); // Gas limit protection
+        
+        uint256 totalAmount = 0;
+        
+        // Calculate total amount and validate recipients
+        for (uint256 i = 0; i < recipients.length; i++) {
+            require(recipients[i] != address(0), "Invalid recipient");
+            require(amounts[i] > 0, "Invalid amount");
+            totalAmount += amounts[i];
+        }
+        
+        // Check allowance and balance
+        require(allowance(from, msg.sender) >= totalAmount, "Insufficient allowance");
+        require(balanceOf(from) >= totalAmount, "Insufficient balance");
+        
+        // Update allowance
+        _approve(from, msg.sender, allowance(from, msg.sender) - totalAmount);
+        
+        // Perform transfers
+        for (uint256 i = 0; i < recipients.length; i++) {
+            _transfer(from, recipients[i], amounts[i]);
+        }
+        
+        emit BatchTransferFrom(msg.sender, from, totalAmount, recipients.length);
+        return true;
+    }
+    
+    /**
+     * @dev Batch transfer same amount to multiple recipients
+     * @param recipients Array of recipient addresses
+     * @param amount Amount to transfer to each recipient
+     * @return success True if all transfers succeeded
+     */
+    function batchTransferSameAmount(
+        address[] calldata recipients,
+        uint256 amount
+    ) external returns (bool success) {
+        require(recipients.length > 0, "Empty array");
+        require(recipients.length <= 200, "Too many recipients"); // Gas limit protection
+        require(amount > 0, "Invalid amount");
+        
+        uint256 totalAmount = amount * recipients.length;
+        require(balanceOf(msg.sender) >= totalAmount, "Insufficient balance");
+        
+        // Validate recipients and perform transfers
+        for (uint256 i = 0; i < recipients.length; i++) {
+            require(recipients[i] != address(0), "Invalid recipient");
+            _transfer(msg.sender, recipients[i], amount);
+        }
+        
+        emit BatchTransfer(msg.sender, totalAmount, recipients.length);
+        return true;
+    }
+    
+    /**
+     * @dev Get the total amount needed for a batch transfer
+     * @param amounts Array of amounts
+     * @return total The sum of all amounts
+     */
+    function getBatchTransferTotal(uint256[] calldata amounts) 
+        external 
+        pure 
+        returns (uint256 total) 
+    {
+        for (uint256 i = 0; i < amounts.length; i++) {
+            total += amounts[i];
+        }
     }
 }
