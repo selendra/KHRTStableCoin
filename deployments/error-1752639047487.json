@@ -1,0 +1,8 @@
+{
+  "timestamp": "2025-07-16T04:10:47.487Z",
+  "network": "selendra",
+  "chainId": "1961",
+  "deployer": "0xc0a71815AC20537b20190d3F23e73619Acc09270",
+  "error": "HH700: Artifact for contract \"KHRTStablecoin\" not found. Did you mean \"IKHRTStablecoin\"?",
+  "stack": "HardhatError: HH700: Artifact for contract \"KHRTStablecoin\" not found. Did you mean \"IKHRTStablecoin\"?\n    at Artifacts._handleWrongArtifactForContractName (/home/koompipro/project/khrt/node_modules/hardhat/src/internal/artifacts.ts:721:11)\n    at Artifacts._getArtifactPathFromFiles (/home/koompipro/project/khrt/node_modules/hardhat/src/internal/artifacts.ts:852:19)\n    at Artifacts._getArtifactPath (/home/koompipro/project/khrt/node_modules/hardhat/src/internal/artifacts.ts:516:21)\n    at async Artifacts.readArtifact (/home/koompipro/project/khrt/node_modules/hardhat/src/internal/artifacts.ts:71:26)\n    at async getContractFactory (/home/koompipro/project/khrt/node_modules/@nomicfoundation/hardhat-ethers/src/internal/helpers.ts:120:22)\n    at async main (/home/koompipro/project/khrt/scripts/deploy.ts:52:30)"
+}

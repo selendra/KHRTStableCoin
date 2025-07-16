@@ -1,0 +1,8 @@
+{
+  "timestamp": "2025-07-16T04:11:44.478Z",
+  "network": "selendra",
+  "chainId": "1961",
+  "deployer": "0xc0a71815AC20537b20190d3F23e73619Acc09270",
+  "error": "incorrect number of arguments to constructor",
+  "stack": "Error: incorrect number of arguments to constructor\n    at ContractFactory.getDeployTransaction (/home/koompipro/project/khrt/node_modules/ethers/src.ts/contract/factory.ts:87:19)\n    at ContractFactory.deploy (/home/koompipro/project/khrt/node_modules/ethers/src.ts/contract/factory.ts:105:31)\n    at main (/home/koompipro/project/khrt/scripts/deploy.ts:54:49)"
+}

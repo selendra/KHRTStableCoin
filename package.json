@@ -14,7 +14,7 @@
     "deploy:local": "hardhat run scripts/deploy.ts",
     "deploy:selendra": "hardhat run scripts/deploy.ts --network selendra",
     "deploy:erc20": "hardhat run scripts/erc20Deploy.ts --network selendra",
-    "add:whitelist": "hardhat run scripts/whiteList.ts --network selendra",
+    "whitelist:selendra": "hardhat run scripts/whiteList.ts --network selendra",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
     "node": "hardhat node",
     "clean": "hardhat clean"
@@ -31,6 +31,7 @@
   "dependencies": {
     "@openzeppelin/contracts": "^5.3.0",
     "@openzeppelin/contracts-upgradeable": "^5.3.0",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
     "dotenv": "^17.2.0"
   }
 }

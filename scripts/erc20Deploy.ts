@@ -8,7 +8,11 @@ async function main() {
     console.log("Deploying with account:", deployer.address);
     console.log("Account balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "ETH\n");
 
-    // Configuration for different  tokens
+    // Get current nonce to avoid conflicts
+    const currentNonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
+    console.log("Current nonce:", currentNonce);
+
+    // Configuration for different tokens
     const Tokens = [
         {
             name: "STAR TOKEN",
@@ -23,58 +27,89 @@ async function main() {
 
     const deployedTokens = [];
 
-    // Deploy each  token
-    for (const tokenConfig of Tokens) {
+    // Deploy each token
+    for (let i = 0; i < Tokens.length; i++) {
+        const tokenConfig = Tokens[i];
         console.log(`Deploying ${tokenConfig.name} (${tokenConfig.symbol})...`);
         
         try {
-            // Deploy the contract
-            const Token = await ERC20.deploy(
-                tokenConfig.name,
-                tokenConfig.symbol,
-                tokenConfig.decimals,
-                deployer.address // initialOwner
-            );
+            // Add retry logic with exponential backoff
+            let deploymentSuccessful = false;
+            let retryCount = 0;
+            const maxRetries = 3;
 
-            // Wait for deployment confirmation
-            await Token.waitForDeployment();
-            const tokenAddress = await Token.getAddress();
-            
-            console.log(`✅ ${tokenConfig.symbol} deployed to:`, tokenAddress);
+            while (!deploymentSuccessful && retryCount < maxRetries) {
+                try {
+                    // Deploy the contract with explicit nonce and gas settings
+                    const Token = await ERC20.deploy(
+                        tokenConfig.name,
+                        tokenConfig.symbol,
+                        tokenConfig.decimals,
+                        deployer.address, // initialOwner
+                        {
+                            nonce: currentNonce + i + retryCount,
+                            gasLimit: 3000000, // Explicit gas limit
+                            gasPrice: ethers.parseUnits("20", "gwei") // Explicit gas price
+                        }
+                    );
 
-            // Mint initial supply to deployer
-            if (tokenConfig.initialSupply > 0) {
-                console.log(`Minting initial supply of ${ethers.formatUnits(tokenConfig.initialSupply, tokenConfig.decimals)} ${tokenConfig.symbol}...`);
-                const mintTx = await Token.mint(deployer.address, tokenConfig.initialSupply);
-                await mintTx.wait();
-                console.log(`✅ Initial supply minted`);
+                    // Wait for deployment confirmation with timeout
+                    console.log("Waiting for deployment confirmation...");
+                    await Token.waitForDeployment();
+                    const tokenAddress = await Token.getAddress();
+                    
+                    console.log(`✅ ${tokenConfig.symbol} deployed to:`, tokenAddress);
+
+                    // Mint initial supply to deployer
+                    if (tokenConfig.initialSupply > 0) {
+                        console.log(`Minting initial supply of ${ethers.formatUnits(tokenConfig.initialSupply, tokenConfig.decimals)} ${tokenConfig.symbol}...`);
+                        const mintTx = await Token.mint(deployer.address, tokenConfig.initialSupply);
+                        await mintTx.wait();
+                        console.log(`✅ Initial supply minted`);
+                    }
+
+                    // Verify contract deployment
+                    const deployedName = await Token.name();
+                    const deployedSymbol = await Token.symbol();
+                    const deployedDecimals = await Token.decimals();
+                    const deployedOwner = await Token.owner();
+                    const totalSupply = await Token.totalSupply();
+
+                    console.log(`Contract verification:`);
+                    console.log(`  Name: ${deployedName}`);
+                    console.log(`  Symbol: ${deployedSymbol}`);
+                    console.log(`  Decimals: ${deployedDecimals}`);
+                    console.log(`  Owner: ${deployedOwner}`);
+                    console.log(`  Total Supply: ${ethers.formatUnits(totalSupply, deployedDecimals)}`);
+
+                    deployedTokens.push({
+                        name: tokenConfig.name,
+                        symbol: tokenConfig.symbol,
+                        address: tokenAddress,
+                        decimals: deployedDecimals,
+                        totalSupply: ethers.formatUnits(totalSupply, deployedDecimals)
+                    });
+
+                    deploymentSuccessful = true;
+                    console.log("─".repeat(60));
+
+                } catch (retryError) {
+                    retryCount++;
+                    console.log(`❌ Attempt ${retryCount} failed:`, retryError.message);
+                    
+                    if (retryCount < maxRetries) {
+                        const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff
+                        console.log(`Retrying in ${waitTime/1000} seconds...`);
+                        await new Promise(resolve => setTimeout(resolve, waitTime));
+                    }
+                }
             }
 
-            // Verify contract deployment
-            const deployedName = await Token.name();
-            const deployedSymbol = await Token.symbol();
-            const deployedDecimals = await Token.decimals();
-            const deployedOwner = await Token.owner();
-            const totalSupply = await Token.totalSupply();
+            if (!deploymentSuccessful) {
+                throw new Error(`Failed to deploy after ${maxRetries} attempts`);
+            }
 
-            console.log(`Contract verification:`);
-            console.log(`  Name: ${deployedName}`);
-            console.log(`  Symbol: ${deployedSymbol}`);
-            console.log(`  Decimals: ${deployedDecimals}`);
-            console.log(`  Owner: ${deployedOwner}`);
-            console.log(`  Total Supply: ${ethers.formatUnits(totalSupply, deployedDecimals)}`);
-
-            deployedTokens.push({
-                name: tokenConfig.name,
-                symbol: tokenConfig.symbol,
-                address: tokenAddress,
-                decimals: deployedDecimals,
-                totalSupply: ethers.formatUnits(totalSupply, deployedDecimals)
-            });
-
-            console.log("─".repeat(60));
-
-        } catch (error: any) {
+        } catch (error) {
             console.error(`❌ Failed to deploy ${tokenConfig.symbol}:`, error.message);
             console.log("─".repeat(60));
         }
