@@ -14,7 +14,7 @@ interface TokenConfig {
 // Your token configurations
 const TOKEN_CONFIGS: TokenConfig[] = [
   {
-    address: "0xc15c87cB326c22a801680DcC78Cb0032808B62a2",
+    address: "0xCfAAaBb2F635D18AA4551e9283c04e85D63799a8",
     symbol: "STAR",
     name: "STAR TOKEN",
     decimals: 18,

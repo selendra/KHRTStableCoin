@@ -13,8 +13,8 @@ async function main() {
         {
             name: "STAR TOKEN",
             symbol: "STAR", 
-            decimals: 19,
-            initialSupply: ethers.parseUnits("1000000000", 18)
+            decimals: 18,
+            initialSupply: ethers.parseUnits("0", 18)
         },
     ];
 
