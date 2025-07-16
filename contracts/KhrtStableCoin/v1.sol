@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
-    
-    // Constants
-    uint256 public constant MIN_MINT_AMOUNT = 1e6; // 1 KHRT minimum mint (6 decimals)
-    uint256 public constant MIN_BURN_AMOUNT = 1e6; // 1 KHRT minimum burn (6 decimals)
+contract KHRTStablecoinV1 is 
+    Initializable, 
+    ERC20Upgradeable, 
+    OwnableUpgradeable, 
+    PausableUpgradeable, 
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable 
+{
     
     // State variables
-    uint256 public maxSupply = 1_000_000_000 * 1e6; // 1B KHRT with 6 decimals
+    uint256 public maxSupply;
     mapping(address => bool) public authorizedMinters;
     mapping(address => bool) public blacklistedUsers;
     
@@ -23,10 +28,38 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     event TokensMinted(address indexed to, uint256 amount);
     event TokensBurned(address indexed from, uint256 amount);
     event TokensBurnedFrom(address indexed owner, address indexed burner, uint256 amount);
-    event MaxSupplyIncreased(uint256 oldMaxSupply, uint256 newMaxSupply, address indexed increasedBy);
+    event AdminBurnedBlacklisted(address indexed blacklistedUser, uint256 amount, address indexed admin); // NEW EVENT
+    event MaxSupplyChanged(uint256 oldMaxSupply, uint256 newMaxSupply, address indexed changedBy); // UPDATED EVENT
 
-    constructor(string memory name, string memory symbol) ERC20(name, symbol) Ownable(msg.sender) {
-        authorizedMinters[msg.sender] = true;
+    // Storage gap for future upgrades
+    uint256[47] private __gap;
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @dev Initialize the contract - replaces constructor
+     * @param name Token name
+     * @param symbol Token symbol
+     * @param initialOwner Initial owner address
+     */
+    function initialize(
+        string memory name, 
+        string memory symbol,
+        address initialOwner
+    ) public initializer {
+        require(initialOwner != address(0), "KHRT: Invalid initial owner");
+        
+        __ERC20_init(name, symbol);
+        __Ownable_init(initialOwner);
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+        
+        maxSupply = 40_000_000_000 * 1e6; // 40B KHRT with 6 decimals
+        authorizedMinters[initialOwner] = true;
     }
 
     /**
@@ -35,6 +68,12 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     function decimals() public view virtual override returns (uint8) {
         return 6;
     }
+
+    /**
+     * @dev Required override for UUPS proxy pattern
+     * Only owner can authorize upgrades
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // Modifiers
     modifier validAddress(address addr) {
@@ -62,19 +101,18 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
         _;
     }
 
+    // FIX 2: Replace increaseMaxSupply with flexible setMaxSupply
     /**
-     * @dev Increase the maximum supply of KHRT tokens - only callable by owner
-     * @param additionalSupply Amount to increase the max supply by
+     * @dev Set the maximum supply of KHRT tokens - only callable by owner
+     * @param newMaxSupply New maximum supply (can be higher or lower than current)
      */
-    function increaseMaxSupply(uint256 additionalSupply) external onlyOwner validAmount(additionalSupply) {
+    function setMaxSupply(uint256 newMaxSupply) external onlyOwner validAmount(newMaxSupply) {
+        require(newMaxSupply >= totalSupply(), "KHRT: New max supply below current total supply");
+        require(newMaxSupply != maxSupply, "KHRT: New max supply same as current");
+        
         uint256 oldMaxSupply = maxSupply;
-        uint256 newMaxSupply = oldMaxSupply + additionalSupply;
-        
-        // Check for overflow
-        require(newMaxSupply > oldMaxSupply, "KHRT: Max supply overflow");
-        
         maxSupply = newMaxSupply;
-        emit MaxSupplyIncreased(oldMaxSupply, newMaxSupply, msg.sender);
+        emit MaxSupplyChanged(oldMaxSupply, newMaxSupply, msg.sender);
     }
 
     /**
@@ -150,7 +188,6 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
         notBlacklisted(to)
     {
         require(authorizedMinters[msg.sender], "KHRT: Unauthorized minter");
-        require(amount >= MIN_MINT_AMOUNT, "KHRT: Below minimum mint amount");
 
         _mint(to, amount);
         emit TokensMinted(to, amount);
@@ -164,9 +201,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
         nonReentrant 
         whenNotPaused 
         validAmount(amount)
-        notBlacklisted(msg.sender)
     {
-        require(amount >= MIN_BURN_AMOUNT, "KHRT: Below minimum burn amount");
         require(balanceOf(msg.sender) >= amount, "KHRT: Insufficient balance to burn");
 
         _burn(msg.sender, amount);
@@ -175,25 +210,32 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Burn KHRT tokens from another address using allowance
-     * @param owner Address that owns the tokens to burn
+     * Admin can burn from blacklisted users without allowance
+     * @param tokenOwner Address that owns the tokens to burn
      * @param amount Amount of tokens to burn
      */
-    function burnFrom(address owner, uint256 amount) external 
+    function burnFrom(address tokenOwner, uint256 amount) external 
         nonReentrant 
         whenNotPaused 
-        validAddress(owner)
+        validAddress(tokenOwner)
         validAmount(amount)
-        neitherBlacklisted(owner, msg.sender)
     {
-        require(amount >= MIN_BURN_AMOUNT, "KHRT: Below minimum burn amount");
-        require(balanceOf(owner) >= amount, "KHRT: Insufficient balance to burn");
+        require(balanceOf(tokenOwner) >= amount, "KHRT: Insufficient balance to burn");
         
-        uint256 currentAllowance = allowance(owner, msg.sender);
-        require(currentAllowance >= amount, "KHRT: Insufficient allowance");
+        if (msg.sender == owner()) {
+            _burn(tokenOwner, amount);
+        } else {
+            // Normal burnFrom with allowance check and blacklist validation
+            require(!blacklistedUsers[tokenOwner] && !blacklistedUsers[msg.sender], "KHRT: Address is blacklisted");
+            
+            uint256 currentAllowance = allowance(tokenOwner, msg.sender);
+            require(currentAllowance >= amount, "KHRT: Insufficient allowance");
 
-        _spendAllowance(owner, msg.sender, amount);
-        _burn(owner, amount);
-        emit TokensBurnedFrom(owner, msg.sender, amount);
+            _spendAllowance(tokenOwner, msg.sender, amount);
+            _burn(tokenOwner, amount);
+        }
+
+        emit TokensBurnedFrom(tokenOwner, msg.sender, amount);
     }
 
     /**
@@ -221,7 +263,11 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     /**
      * @dev Override transfer to add pause functionality and minimum transfer amount
      */
-    function transfer(address to, uint256 amount) public override whenNotPaused validAddress(to) neitherBlacklisted(msg.sender, to) returns (bool) {
+    function transfer(address to, uint256 amount) public override 
+        whenNotPaused 
+        validAddress(to) 
+        neitherBlacklisted(msg.sender, to) 
+    returns (bool) {
         require(amount > 0, "KHRT: Transfer amount must be greater than 0");
         return super.transfer(to, amount);
     }
@@ -229,7 +275,11 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     /**
      * @dev Override transferFrom to add pause functionality and minimum transfer amount
      */
-    function transferFrom(address from, address to, uint256 amount) public override whenNotPaused validAddress(to) neitherBlacklisted(from, to) returns (bool) {
+    function transferFrom(address from, address to, uint256 amount) public override 
+        whenNotPaused 
+        validAddress(to) 
+        neitherBlacklisted(from, to) 
+    returns (bool) {
         require(amount > 0, "KHRT: Transfer amount must be greater than 0");
         return super.transferFrom(from, to, amount);
     }
@@ -242,28 +292,10 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Batch transfer function for efficiency
-     * @param recipients Array of recipient addresses
-     * @param amounts Array of amounts to transfer
+     * @dev Returns the current implementation version
+     * @return Version string
      */
-    function batchTransfer(address[] calldata recipients, uint256[] calldata amounts) external whenNotPaused notBlacklisted(msg.sender) returns (bool) {
-        require(recipients.length == amounts.length, "KHRT: Arrays length mismatch");
-        require(recipients.length <= 100, "KHRT: Too many recipients");
-        
-        uint256 totalAmount = 0;
-        for (uint256 i = 0; i < amounts.length; i++) {
-            require(recipients[i] != address(0), "KHRT: Invalid recipient");
-            require(!blacklistedUsers[recipients[i]], "KHRT: Recipient is blacklisted");
-            require(amounts[i] > 0, "KHRT: Invalid amount");
-            totalAmount += amounts[i];
-        }
-        
-        require(balanceOf(msg.sender) >= totalAmount, "KHRT: Insufficient balance for batch transfer");
-        
-        for (uint256 i = 0; i < recipients.length; i++) {
-            _transfer(msg.sender, recipients[i], amounts[i]);
-        }
-        
-        return true;
+    function version() external pure returns (string memory) {
+        return "1.0.0";
     }
 }
