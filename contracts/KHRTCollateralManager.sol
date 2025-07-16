@@ -9,10 +9,9 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IKHRTStablecoin {
-    function mintWithCollateral(address to, uint256 amount, address collateralToken) external;
+    function mint(address to, uint256 amount) external;
     function burnFrom(address owner, uint256 amount) external;
-    function isTokenWhitelisted(address token) external view returns (bool);
-    function isCollateralMinter(address minter) external view returns (bool);
+    function isAuthorizedMinter(address minter) external view returns (bool);
     function decimals() external view returns (uint8);
 }
 
@@ -26,6 +25,9 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     
     // Scaling factor for ratio precision (18 decimals)
     uint256 public constant RATIO_PRECISION = 1e18;
+    
+    // Whitelist for collateral tokens
+    mapping(address => bool) public whitelistedTokens;
     
     // Collateral token address => ratio (KHRT amount per 1 collateral token, scaled by RATIO_PRECISION)
     // Example: 1 USDT = 4000 KHRT would be stored as 4000 * 1e18
@@ -41,14 +43,51 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     mapping(address => mapping(address => uint256)) public userMintedAmounts;
 
     // Events
+    event TokenWhitelisted(address indexed token, bool status);
     event CollateralRatioSet(address indexed token, uint256 ratio);
     event CollateralDeposited(address indexed user, address indexed token, uint256 amount, uint256 mintedKHRT);
     event CollateralWithdrawn(address indexed user, address indexed token, uint256 amount, uint256 burnedKHRT);
+    event TokensMinted(address indexed to, uint256 amount);
     event EmergencyWithdrawal(address indexed token, uint256 amount);
 
     constructor(address _khrtToken) Ownable(msg.sender) {
         require(_khrtToken != address(0), "CollateralManager: Invalid KHRT token address");
         khrtToken = IKHRTStablecoin(_khrtToken);
+    }
+
+    /**
+     * @dev Add or remove a token from whitelist
+     * @param token Address of the ERC20 token
+     * @param status True to whitelist, false to remove
+     */
+    function setTokenWhitelist(address token, bool status) external onlyOwner {
+        require(token != address(0), "CollateralManager: Invalid token address");
+        whitelistedTokens[token] = status;
+        emit TokenWhitelisted(token, status);
+    }
+
+    /**
+     * @dev Batch whitelist multiple tokens
+     * @param tokens Array of token addresses
+     * @param statuses Array of corresponding statuses
+     */
+    function batchSetTokenWhitelist(address[] calldata tokens, bool[] calldata statuses) external onlyOwner {
+        require(tokens.length == statuses.length, "CollateralManager: Arrays length mismatch");
+        require(tokens.length <= 50, "CollateralManager: Too many tokens");
+        
+        for (uint256 i = 0; i < tokens.length; i++) {
+            require(tokens[i] != address(0), "CollateralManager: Invalid token address");
+            whitelistedTokens[tokens[i]] = statuses[i];
+            emit TokenWhitelisted(tokens[i], statuses[i]);
+        }
+    }
+
+    /**
+     * @dev Check if a token is whitelisted
+     * @param token Address of the token to check
+     */
+    function isTokenWhitelisted(address token) external view returns (bool) {
+        return whitelistedTokens[token];
     }
 
     /**
@@ -61,7 +100,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     function setCollateralRatio(address token, uint256 khrtPerToken) external onlyOwner {
         require(token != address(0), "CollateralManager: Invalid token address");
         require(khrtPerToken > 0, "CollateralManager: Ratio must be greater than 0");
-        require(khrtToken.isTokenWhitelisted(token), "CollateralManager: Token not whitelisted in KHRT");
+        require(whitelistedTokens[token], "CollateralManager: Token not whitelisted");
         
         // Store the ratio scaled by precision factor
         collateralRatios[token] = khrtPerToken * RATIO_PRECISION;
@@ -117,6 +156,22 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @dev Mint KHRT tokens without collateral - only callable by owner
+     * @param to Address to mint tokens to
+     * @param amount Amount of KHRT tokens to mint
+     */
+    function mintKHRT(address to, uint256 amount) external onlyOwner nonReentrant whenNotPaused {
+        require(to != address(0), "CollateralManager: Invalid recipient address");
+        require(amount > 0, "CollateralManager: Amount must be greater than 0");
+        require(khrtToken.isAuthorizedMinter(address(this)), "CollateralManager: Not authorized as minter");
+
+        // Mint KHRT tokens
+        khrtToken.mint(to, amount);
+
+        emit TokensMinted(to, amount);
+    }
+
+    /**
      * @dev Deposit collateral and mint KHRT tokens
      * @param token Address of the collateral token
      * @param amount Amount of collateral tokens to deposit
@@ -125,8 +180,8 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         require(token != address(0), "CollateralManager: Invalid token address");
         require(amount > 0, "CollateralManager: Amount must be greater than 0");
         require(collateralRatios[token] > 0, "CollateralManager: Token ratio not set");
-        require(khrtToken.isTokenWhitelisted(token), "CollateralManager: Token not whitelisted");
-        require(khrtToken.isCollateralMinter(address(this)), "CollateralManager: Not authorized as collateral minter");
+        require(whitelistedTokens[token], "CollateralManager: Token not whitelisted");
+        require(khrtToken.isAuthorizedMinter(address(this)), "CollateralManager: Not authorized as minter");
 
         // Calculate KHRT amount to mint based on ratio and decimals
         uint256 khrtAmount = calculateKHRTAmount(token, amount);
@@ -141,7 +196,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         userMintedAmounts[msg.sender][token] += khrtAmount;
 
         // Mint KHRT tokens
-        khrtToken.mintWithCollateral(msg.sender, khrtAmount, token);
+        khrtToken.mint(msg.sender, khrtAmount);
 
         emit CollateralDeposited(msg.sender, token, amount, khrtAmount);
     }
@@ -319,7 +374,7 @@ contract KHRTCollateralManager is Ownable, Pausable, ReentrancyGuard {
         decimals = getTokenDecimals(token);
         ratio = collateralRatios[token] / RATIO_PRECISION;
         totalDeposited = totalCollateralDeposited[token];
-        isWhitelisted = khrtToken.isTokenWhitelisted(token);
+        isWhitelisted = whitelistedTokens[token];
     }
 
     /**

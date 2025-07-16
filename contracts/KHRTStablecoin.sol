@@ -14,25 +14,19 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     
     // State variables
     uint256 public maxSupply = 1_000_000_000 * 1e6; // 1B KHRT with 6 decimals
-    mapping(address => bool) public whitelistedTokens;
-    mapping(address => bool) public collateralMinters;
-    mapping(address => bool) public normalMinters;
+    mapping(address => bool) public authorizedMinters;
     mapping(address => bool) public blacklistedUsers;
     
     // Events
-    event TokenWhitelisted(address indexed token, bool status);
-    event CollateralMinterAuthorized(address indexed minter, bool status);
-    event NormalMinterAuthorized(address indexed minter, bool status);
+    event MinterAuthorized(address indexed minter, bool status);
     event UserBlacklisted(address indexed user, bool status);
-    event TokensMintedWithCollateral(address indexed to, uint256 amount, address indexed collateralToken);
     event TokensMinted(address indexed to, uint256 amount);
     event TokensBurned(address indexed from, uint256 amount);
     event TokensBurnedFrom(address indexed owner, address indexed burner, uint256 amount);
     event MaxSupplyIncreased(uint256 oldMaxSupply, uint256 newMaxSupply, address indexed increasedBy);
 
     constructor(string memory name, string memory symbol) ERC20(name, symbol) Ownable(msg.sender) {
-        collateralMinters[msg.sender] = true;
-        normalMinters[msg.sender] = true;
+        authorizedMinters[msg.sender] = true;
     }
 
     /**
@@ -91,49 +85,13 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Add or remove a token from whitelist
-     * @param token Address of the ERC20 token
-     * @param status True to whitelist, false to remove
-     */
-    function setTokenWhitelist(address token, bool status) external onlyOwner validAddress(token) {
-        whitelistedTokens[token] = status;
-        emit TokenWhitelisted(token, status);
-    }
-
-    /**
-     * @dev Batch whitelist multiple tokens
-     * @param tokens Array of token addresses
-     * @param statuses Array of corresponding statuses
-     */
-    function batchSetTokenWhitelist(address[] calldata tokens, bool[] calldata statuses) external onlyOwner {
-        require(tokens.length == statuses.length, "KHRT: Arrays length mismatch");
-        require(tokens.length <= 50, "KHRT: Too many tokens");
-        
-        for (uint256 i = 0; i < tokens.length; i++) {
-            require(tokens[i] != address(0), "KHRT: Invalid token address");
-            whitelistedTokens[tokens[i]] = statuses[i];
-            emit TokenWhitelisted(tokens[i], statuses[i]);
-        }
-    }
-
-    /**
-     * @dev Authorize or revoke collateral minting permissions
+     * @dev Authorize or revoke minting permissions
      * @param minter Address to authorize/revoke
      * @param status True to authorize, false to revoke
      */
-    function setCollateralMinter(address minter, bool status) external onlyOwner validAddress(minter) {
-        collateralMinters[minter] = status;
-        emit CollateralMinterAuthorized(minter, status);
-    }
-
-    /**
-     * @dev Authorize or revoke normal minting permissions
-     * @param minter Address to authorize/revoke
-     * @param status True to authorize, false to revoke
-     */
-    function setNormalMinter(address minter, bool status) external onlyOwner validAddress(minter) {
-        normalMinters[minter] = status;
-        emit NormalMinterAuthorized(minter, status);
+    function setAuthorizedMinter(address minter, bool status) external onlyOwner validAddress(minter) {
+        authorizedMinters[minter] = status;
+        emit MinterAuthorized(minter, status);
     }
 
     /**
@@ -163,27 +121,11 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Check if a token is whitelisted
-     * @param token Address of the token to check
-     */
-    function isTokenWhitelisted(address token) external view returns (bool) {
-        return whitelistedTokens[token];
-    }
-
-    /**
-     * @dev Check if an address is a collateral minter
+     * @dev Check if an address is an authorized minter
      * @param minter Address to check
      */
-    function isCollateralMinter(address minter) external view returns (bool) {
-        return collateralMinters[minter];
-    }
-
-    /**
-     * @dev Check if an address is a normal minter
-     * @param minter Address to check
-     */
-    function isNormalMinter(address minter) external view returns (bool) {
-        return normalMinters[minter];
+    function isAuthorizedMinter(address minter) external view returns (bool) {
+        return authorizedMinters[minter];
     }
 
     /**
@@ -195,33 +137,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Mint KHRT tokens with collateral backing - only callable by authorized collateral minters
-     * @param to Address to mint tokens to
-     * @param amount Amount of tokens to mint
-     * @param collateralToken Address of collateral token (for verification)
-     */
-    function mintWithCollateral(
-        address to, 
-        uint256 amount, 
-        address collateralToken
-    ) external 
-        nonReentrant 
-        whenNotPaused 
-        validAddress(to)
-        validAmount(amount)
-        checkSupplyLimit(amount)
-        notBlacklisted(to)
-    {
-        require(collateralMinters[msg.sender], "KHRT: Unauthorized collateral minter");
-        require(whitelistedTokens[collateralToken], "KHRT: Token not whitelisted");
-        require(amount >= MIN_MINT_AMOUNT, "KHRT: Below minimum mint amount");
-
-        _mint(to, amount);
-        emit TokensMintedWithCollateral(to, amount, collateralToken);
-    }
-
-    /**
-     * @dev Mint KHRT tokens - only callable by authorized normal minters
+     * @dev Mint KHRT tokens - only callable by authorized minters
      * @param to Address to mint tokens to
      * @param amount Amount of tokens to mint
      */
@@ -233,7 +149,7 @@ contract KHRTStablecoin is ERC20, Ownable, Pausable, ReentrancyGuard {
         checkSupplyLimit(amount)
         notBlacklisted(to)
     {
-        require(normalMinters[msg.sender], "KHRT: Unauthorized normal minter");
+        require(authorizedMinters[msg.sender], "KHRT: Unauthorized minter");
         require(amount >= MIN_MINT_AMOUNT, "KHRT: Below minimum mint amount");
 
         _mint(to, amount);
