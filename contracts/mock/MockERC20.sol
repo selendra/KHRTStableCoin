@@ -108,45 +108,4 @@ contract MockERC20 is ERC20, Ownable {
         return true;
     }
     
-    /**
-     * @dev Batch transfer same amount to multiple recipients
-     * @param recipients Array of recipient addresses
-     * @param amount Amount to transfer to each recipient
-     * @return success True if all transfers succeeded
-     */
-    function batchTransferSameAmount(
-        address[] calldata recipients,
-        uint256 amount
-    ) external returns (bool success) {
-        require(recipients.length > 0, "Empty array");
-        require(recipients.length <= 200, "Too many recipients"); // Gas limit protection
-        require(amount > 0, "Invalid amount");
-        
-        uint256 totalAmount = amount * recipients.length;
-        require(balanceOf(msg.sender) >= totalAmount, "Insufficient balance");
-        
-        // Validate recipients and perform transfers
-        for (uint256 i = 0; i < recipients.length; i++) {
-            require(recipients[i] != address(0), "Invalid recipient");
-            _transfer(msg.sender, recipients[i], amount);
-        }
-        
-        emit BatchTransfer(msg.sender, totalAmount, recipients.length);
-        return true;
-    }
-    
-    /**
-     * @dev Get the total amount needed for a batch transfer
-     * @param amounts Array of amounts
-     * @return total The sum of all amounts
-     */
-    function getBatchTransferTotal(uint256[] calldata amounts) 
-        external 
-        pure 
-        returns (uint256 total) 
-    {
-        for (uint256 i = 0; i < amounts.length; i++) {
-            total += amounts[i];
-        }
-    }
 }
