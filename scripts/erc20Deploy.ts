@@ -8,15 +8,13 @@ async function main() {
     console.log("Deploying with account:", deployer.address);
     console.log("Account balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "ETH\n");
 
-    // Get current nonce to avoid conflicts
-    const currentNonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
-    console.log("Current nonce:", currentNonce);
+    // We'll get fresh nonce for each deployment attempt
 
     // Configuration for different tokens
     const Tokens = [
         {
-            name: "STAR TOKEN",
-            symbol: "STAR", 
+            name: "TEST STAR TOKEN",
+            symbol: "TSTARK", 
             decimals: 18,
             initialSupply: ethers.parseUnits("0", 18)
         },
@@ -40,16 +38,27 @@ async function main() {
 
             while (!deploymentSuccessful && retryCount < maxRetries) {
                 try {
-                    // Deploy the contract with explicit nonce and gas settings
+                    // Get fresh nonce for each attempt
+                    const currentNonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
+                    console.log(`Using nonce: ${currentNonce}`);
+                    
+                    // Use much higher gas price to ensure transaction goes through
+                    const gasPrice = retryCount === 0 
+                        ? ethers.parseUnits("100", "gwei")
+                        : ethers.parseUnits((100 + retryCount * 50).toString(), "gwei"); // Increase gas price on retries
+                    
+                    console.log(`Using gas price: ${ethers.formatUnits(gasPrice, "gwei")} gwei`);
+                    
+                    // Deploy the contract with fresh nonce and gas settings
                     const Token = await ERC20.deploy(
                         tokenConfig.name,
                         tokenConfig.symbol,
                         tokenConfig.decimals,
                         deployer.address, // initialOwner
                         {
-                            nonce: currentNonce + i + retryCount,
+                            nonce: currentNonce,
                             gasLimit: 3000000, // Explicit gas limit
-                            gasPrice: ethers.parseUnits("20", "gwei") // Explicit gas price
+                            gasPrice: gasPrice
                         }
                     );
 
@@ -93,7 +102,7 @@ async function main() {
                     deploymentSuccessful = true;
                     console.log("─".repeat(60));
 
-                } catch (retryError) {
+                } catch (retryError: any) {
                     retryCount++;
                     console.log(`❌ Attempt ${retryCount} failed:`, retryError.message);
                     
@@ -109,7 +118,7 @@ async function main() {
                 throw new Error(`Failed to deploy after ${maxRetries} attempts`);
             }
 
-        } catch (error) {
+        } catch (error: any) {
             console.error(`❌ Failed to deploy ${tokenConfig.symbol}:`, error.message);
             console.log("─".repeat(60));
         }
@@ -157,7 +166,7 @@ main()
         console.log("\n✅ Deployment script completed successfully");
         process.exit(0);
     })
-    .catch((error) => {
+    .catch((error: any) => {
         console.error("\n❌ Deployment script failed:");
         console.error(error);
         process.exit(1);
