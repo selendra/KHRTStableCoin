@@ -1,265 +1,210 @@
 import { ethers } from "hardhat";
-
-// Replace these with your actual deployed contract addresses
-const DEPLOYED_ADDRESSES = {
-  roleController: "0x59643E9a45000227747b8D7cCC0f23Eef2801AC7",
-  governance: "0xbe7e8b2a486dFfA489A1e9740d5bF273C3F9F671",
-  stablecoin: "0x3a7E7fDA5cB9967eA57f4D30A8b087a1Be3943c3"
-};
+import { upgrades } from "hardhat";
+import fs from "fs";
+import path from "path";
 
 async function main() {
-  console.log("🔍 KHRT Deployment Verification\n");
+  console.log("Starting deployment process...");
+  
+  // Get the deployer account
+  const [deployer] = await ethers.getSigners();
+  console.log("Deploying contracts with the account:", deployer.address);
+  console.log("Account balance:", (await ethers.provider.getBalance(deployer.address)).toString());
 
   try {
-    // Get contract instances
-    console.log("🔗 Connecting to contracts...");
-    const roleController = await ethers.getContractAt("RoleController", DEPLOYED_ADDRESSES.roleController);
-    const governance = await ethers.getContractAt("CouncilGovernance", DEPLOYED_ADDRESSES.governance);
-    const stablecoin = await ethers.getContractAt("KHRTStableCoin", DEPLOYED_ADDRESSES.stablecoin);
-    console.log("✅ Connected to all contracts\n");
+    // Deploy KHRT Stablecoin (Upgradeable)
+    console.log("\n1. Deploying KHRT Stablecoin...");
+    const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoinV1");
+    
+    const khrtProxy = await upgrades.deployProxy(
+      KHRTStablecoin,
+      ["KHRT TSTABLE", "TKHRT", deployer.address],
+      { 
+        initializer: "initialize",
+        kind: "uups",
+        timeout: 0 // No timeout for deployment
+      }
+    );
+    
+    await khrtProxy.waitForDeployment();
+    const khrtAddress = await khrtProxy.getAddress();
+    console.log("KHRT Stablecoin deployed to:", khrtAddress);
+    
+    // Get implementation address
+    const khrtImplementationAddress = await upgrades.erc1967.getImplementationAddress(khrtAddress);
+    console.log("KHRT Implementation address:", khrtImplementationAddress);
 
-    // Basic contract info
-    console.log("📋 CONTRACT INFORMATION:");
-    console.log("Role Controller:", DEPLOYED_ADDRESSES.roleController);
-    console.log("Council Governance:", DEPLOYED_ADDRESSES.governance);
-    console.log("Stablecoin:", DEPLOYED_ADDRESSES.stablecoin);
-    console.log("");
+    // Verify the proxy is initialized correctly
+    console.log("\nVerifying proxy initialization...");
+    const name = await khrtProxy.name();
+    const symbol = await khrtProxy.symbol();
+    const owner = await khrtProxy.owner();
+    console.log("Token name:", name);
+    console.log("Token symbol:", symbol);
+    console.log("Owner:", owner);
 
-    // Role Controller Status
-    console.log("🏛️  ROLE CONTROLLER STATUS:");
-    const governanceStatus = await roleController.getGovernanceStatus();
-    const setupInfo = await roleController.getSetupInfo();
-    const emergencyMode = await roleController.isEmergencyMode();
-    const emergencyAdmin = await roleController.getEmergencyAdmin();
-    
-    console.log("  Governance Active:", governanceStatus[0]);
-    console.log("  Governance Contract:", governanceStatus[1]);
-    console.log("  Setup Phase Active:", setupInfo[0]);
-    console.log("  Setup Deadline:", new Date(Number(setupInfo[1]) * 1000).toLocaleString());
-    console.log("  Emergency Mode:", emergencyMode);
-    console.log("  Emergency Admin:", emergencyAdmin);
-    
-    // Check authorizations
-    const isStablecoinAuth = await roleController.isAuthorizedContract(DEPLOYED_ADDRESSES.stablecoin);
-    const isGovernanceAuth = await roleController.isAuthorizedContract(DEPLOYED_ADDRESSES.governance);
-    console.log("  Stablecoin Authorized:", isStablecoinAuth);
-    console.log("  Governance Authorized:", isGovernanceAuth);
-    console.log("");
+    // Deploy CollateralMinter
+    console.log("\n2. Deploying CollateralMinter...");
+    const CollateralMinter = await ethers.getContractFactory("CollateralMinter");
+    const collateralMinter = await CollateralMinter.deploy(khrtAddress);
+    await collateralMinter.waitForDeployment();
+    const collateralMinterAddress = await collateralMinter.getAddress();
+    console.log("CollateralMinter deployed to:", collateralMinterAddress);
 
-    // Council Governance Status  
-    console.log("🗳️  GOVERNANCE STATUS:");
-    const councilList = await governance.getCouncilList();
-    const totalVotingPower = await governance.totalVotingPower();
-    const activeMembers = await governance.activeMembers();
-    const nextProposalId = await governance.nextProposalId();
-    const votingPeriod = await governance.votingPeriod();
-    const timeLock = await governance.timeLock();
-    const quorumPercent = await governance.quorumPercent();
-    const isPaused = await governance.paused();
+    // Authorize CollateralMinter as a minter
+    console.log("\n3. Authorizing CollateralMinter as KHRT minter...");
     
-    console.log("  Council Members:", councilList.length);
-    console.log("  Active Members:", activeMembers.toString());
-    console.log("  Total Voting Power:", totalVotingPower.toString());
-    console.log("  Next Proposal ID:", nextProposalId.toString());
-    console.log("  Voting Period:", Number(votingPeriod) / (24 * 60 * 60), "days");
-    console.log("  Time Lock:", Number(timeLock) / (24 * 60 * 60), "days");
-    console.log("  Quorum Required:", quorumPercent.toString() + "%");
-    console.log("  Governance Paused:", isPaused);
-    
-    // List council members
-    console.log("  Council Members:");
-    for (let i = 0; i < councilList.length; i++) {
-      const memberInfo = await governance.getCouncilInfo(councilList[i]);
-      console.log(`    ${i + 1}. ${councilList[i]}`);
-      console.log(`       Power: ${memberInfo[1]}, Joined: ${new Date(Number(memberInfo[2]) * 1000).toLocaleDateString()}`);
-    }
-    
-    // Integration status
-    const integrationStatus = await governance.getIntegrationStatus();
-    console.log("  Integration Status:");
-    console.log("    Role Controller Set:", integrationStatus[1]);
-    console.log("    Governance Initialized:", integrationStatus[2]);
-    console.log("    Has Governance Role:", integrationStatus[3]);
-    console.log("");
-
-    // Stablecoin Status
-    console.log("💰 STABLECOIN STATUS:");
-    const tokenName = await stablecoin.name();
-    const tokenSymbol = await stablecoin.symbol();
-    const totalSupply = await stablecoin.totalSupply();
-    const maxSupply = await stablecoin.maxSupply();
-    const tokenDecimals = await stablecoin.decimals();
-    const stablecoinPaused = await stablecoin.paused();
-    const localEmergency = await stablecoin.isEmergencyMode();
-    const stablecoinEmergencyAdmin = await stablecoin.getEmergencyAdmin();
-    
-    console.log("  Name:", tokenName);
-    console.log("  Symbol:", tokenSymbol);
-    console.log("  Decimals:", tokenDecimals);
-    console.log("  Total Supply:", ethers.formatEther(totalSupply));
-    console.log("  Max Supply:", ethers.formatEther(maxSupply));
-    console.log("  Utilization:", ((Number(totalSupply) / Number(maxSupply)) * 100).toFixed(2) + "%");
-    console.log("  Contract Paused:", stablecoinPaused);
-    console.log("  Emergency Mode:", localEmergency);
-    console.log("  Emergency Admin:", stablecoinEmergencyAdmin);
-    
-    // Check emergency status in detail
-    const emergencyStatus = await stablecoin.getEmergencyStatus();
-    console.log("  Emergency Details:");
-    console.log("    Local Emergency:", emergencyStatus[0]);
-    console.log("    Contract Paused:", emergencyStatus[1]);
-    console.log("    Role Controller Emergency:", emergencyStatus[2]);
-    console.log("    Any Emergency Active:", emergencyStatus[3]);
-    console.log("");
-
-    // Role Status
-    console.log("👤 ROLE ASSIGNMENTS:");
-    const roles = [
-      { name: "MINTER_ROLE", value: await roleController.MINTER_ROLE() },
-      { name: "BURNER_ROLE", value: await roleController.BURNER_ROLE() },
-      { name: "BLACKLIST_ROLE", value: await roleController.BLACKLIST_ROLE() },
-      { name: "GOVERNANCE_ROLE", value: await roleController.GOVERNANCE_ROLE() }
-    ];
-    
-    for (const role of roles) {
-      console.log(`  ${role.name}:`);
+    // First check if the function exists and we have the right permissions
+    try {
+      // Check if we're the owner
+      const currentOwner = await khrtProxy.owner();
+      console.log("Current owner:", currentOwner);
+      console.log("Deployer address:", deployer.address);
       
-      // Check common addresses for this role
-      const testAddresses = [
-        ...councilList,
-        DEPLOYED_ADDRESSES.governance,
-        emergencyAdmin,
-        stablecoinEmergencyAdmin
-      ];
+      if (currentOwner.toLowerCase() !== deployer.address.toLowerCase()) {
+        console.error("ERROR: Deployer is not the owner of the KHRT contract!");
+        console.error("Cannot authorize minter without owner permissions.");
+        process.exit(1);
+      }
+
+      // Try to authorize the minter with proper gas settings
+      const authorizeTx = await khrtProxy.setAuthorizedMinter(
+        collateralMinterAddress, 
+        true,
+        {
+          gasLimit: 300000 // Set explicit gas limit
+        }
+      );
       
-      let hasRole = false;
-      for (const addr of testAddresses) {
-        try {
-          if (await roleController.hasRole(role.value, addr)) {
-            console.log(`    ✅ ${addr}`);
-            hasRole = true;
+      console.log("Authorization transaction sent:", authorizeTx.hash);
+      const receipt = await authorizeTx.wait();
+      console.log("Authorization transaction confirmed in block:", receipt.blockNumber);
+      
+      // Verify authorization
+      const isAuthorized = await khrtProxy.isAuthorizedMinter(collateralMinterAddress);
+      console.log("Authorization verified:", isAuthorized);
+      
+      if (!isAuthorized) {
+        console.error("ERROR: CollateralMinter was not properly authorized!");
+        process.exit(1);
+      }
+
+      // Save deployment info
+      const deploymentInfo = {
+        network: (await ethers.provider.getNetwork()).name,
+        chainId: (await ethers.provider.getNetwork()).chainId.toString(),
+        deployer: deployer.address,
+        timestamp: new Date().toISOString(),
+        contracts: {
+          KHRT: {
+            proxy: khrtAddress,
+            implementation: khrtImplementationAddress,
+            name: "KHRT Stablecoin",
+            symbol: "KHRT",
+            decimals: 6,
+            owner: owner,
+            maxSupply: "40000000000000000" // 40B with 6 decimals
+          },
+          CollateralMinter: {
+            address: collateralMinterAddress,
+            khrtToken: khrtAddress,
+            minCollateralRatio: "10000", // 100%
+            authorized: isAuthorized
           }
-        } catch (error) {
-          // Ignore authorization errors for this check
+        }
+      };
+
+      // Create deployments directory if it doesn't exist
+      const deploymentsDir = path.join(__dirname, "../deployments");
+      if (!fs.existsSync(deploymentsDir)) {
+        fs.mkdirSync(deploymentsDir, { recursive: true });
+      }
+
+      // Save deployment info to file
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const deploymentFile = path.join(deploymentsDir, `deployment-${chainId}.json`);
+      fs.writeFileSync(deploymentFile, JSON.stringify(deploymentInfo, null, 2));
+      console.log("\nDeployment info saved to:", deploymentFile);
+
+      // Display summary
+      console.log("\n========== DEPLOYMENT SUMMARY ==========");
+      console.log("KHRT Proxy Address:", khrtAddress);
+      console.log("KHRT Implementation:", khrtImplementationAddress);
+      console.log("KHRT Owner:", owner);
+      console.log("CollateralMinter Address:", collateralMinterAddress);
+      console.log("CollateralMinter Authorized:", isAuthorized);
+      console.log("========================================\n");
+
+      // Display next steps
+      console.log("Next steps:");
+      console.log("1. Whitelist collateral tokens using the whitelist script");
+      console.log("2. Set collateral ratios for each whitelisted token");
+      console.log("3. Verify contracts on block explorer (if applicable)");
+      
+    } catch (authError: any) {
+      console.error("\nERROR during minter authorization:");
+      console.error("Error message:", authError.message);
+      
+      // Try to decode the error
+      if (authError.data) {
+        try {
+          const decodedError = khrtProxy.interface.parseError(authError.data);
+          console.error("Decoded error:", decodedError);
+        } catch (e) {
+          console.error("Could not decode error data");
         }
       }
       
-      if (!hasRole) {
-        console.log(`    ❌ No accounts found with this role`);
-      }
-    }
-    console.log("");
-
-    // Active Proposals
-    console.log("📝 ACTIVE PROPOSALS:");
-    if (Number(nextProposalId) === 0) {
-      console.log("  No proposals created yet");
-    } else {
-      let activeCount = 0;
-      for (let i = 0; i < Number(nextProposalId); i++) {
-        try {
-          const proposalState = await governance.getProposalState(i);
-          const state = Number(proposalState[2]);
-          
-          if (state === 1) { // ACTIVE
-            activeCount++;
-            const proposalAction = await governance.getProposalAction(i);
-            console.log(`  Proposal ${i}: ${proposalAction[3]}`);
-            console.log(`    Deadline: ${new Date(Number(proposalState[3]) * 1000).toLocaleString()}`);
-            console.log(`    Votes: ${proposalState[5]} for, ${proposalState[6]} against`);
+      // Still save deployment info even if authorization failed
+      const deploymentInfo = {
+        network: (await ethers.provider.getNetwork()).name,
+        chainId: (await ethers.provider.getNetwork()).chainId.toString(),
+        deployer: deployer.address,
+        timestamp: new Date().toISOString(),
+        error: "Minter authorization failed",
+        contracts: {
+          KHRT: {
+            proxy: khrtAddress,
+            implementation: khrtImplementationAddress,
+            name: "KHRT Stablecoin",
+            symbol: "KHRT",
+            decimals: 6
+          },
+          CollateralMinter: {
+            address: collateralMinterAddress,
+            khrtToken: khrtAddress,
+            authorized: false,
+            error: "Authorization failed"
           }
-        } catch (error) {
-          // Skip if can't read proposal
         }
-      }
-      
-      if (activeCount === 0) {
-        console.log("  No active proposals");
-      }
-    }
-    console.log("");
+      };
 
-    // Overall Health Check
-    console.log("🏥 SYSTEM HEALTH CHECK:");
-    
-    const healthChecks = [
-      { name: "Role Controller has governance", check: governanceStatus[0] },
-      { name: "Governance points to correct contract", check: governanceStatus[1].toLowerCase() === DEPLOYED_ADDRESSES.governance.toLowerCase() },
-      { name: "Setup phase completed", check: !setupInfo[0] },
-      { name: "Governance has governance role", check: integrationStatus[3] },
-      { name: "Stablecoin authorized", check: isStablecoinAuth },
-      { name: "Governance authorized", check: isGovernanceAuth },
-      { name: "Council properly configured", check: councilList.length >= 3 && totalVotingPower > 0 },
-      { name: "No emergency mode active", check: !emergencyMode && !localEmergency }
-    ];
-    
-    let healthyCount = 0;
-    for (const check of healthChecks) {
-      const status = check.check ? "✅" : "❌";
-      console.log(`  ${status} ${check.name}`);
-      if (check.check) healthyCount++;
-    }
-    
-    const healthPercentage = Math.round((healthyCount / healthChecks.length) * 100);
-    console.log("");
-    console.log(`🎯 OVERALL HEALTH: ${healthPercentage}% (${healthyCount}/${healthChecks.length} checks passed)`);
-    
-    if (healthPercentage === 100) {
-      console.log("🎉 System is fully operational!");
-    } else if (healthPercentage >= 75) {
-      console.log("⚠️  System mostly operational, minor issues detected");
-    } else {
-      console.log("🚨 System has significant issues, manual intervention needed");
-    }
-    console.log("");
+      const deploymentsDir = path.join(__dirname, "../deployments");
+      if (!fs.existsSync(deploymentsDir)) {
+        fs.mkdirSync(deploymentsDir, { recursive: true });
+      }
 
-    // Recommendations
-    if (healthPercentage < 100) {
-      console.log("🛠️  RECOMMENDATIONS:");
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const deploymentFile = path.join(deploymentsDir, `deployment-${chainId}-failed.json`);
+      fs.writeFileSync(deploymentFile, JSON.stringify(deploymentInfo, null, 2));
       
-      if (!governanceStatus[0] || governanceStatus[1].toLowerCase() !== DEPLOYED_ADDRESSES.governance.toLowerCase()) {
-        console.log("- Run the recovery script to fix governance setup");
-      }
+      console.log("\nPartial deployment info saved to:", deploymentFile);
+      console.log("\nIMPORTANT: Contracts were deployed but minter authorization failed!");
+      console.log("You may need to manually authorize the minter using the owner account.");
       
-      if (!isStablecoinAuth || !isGovernanceAuth) {
-        console.log("- Complete contract authorization setup");
-      }
-      
-      if (setupInfo[0]) {
-        console.log("- End the setup phase to secure the system");
-      }
-      
-      if (emergencyMode || localEmergency) {
-        console.log("- Investigate and resolve emergency mode activation");
-      }
-      
-      console.log("- Verify all steps completed correctly");
-      console.log("- Consider running recovery script if needed");
-    } else {
-      console.log("💡 SUGGESTIONS:");
-      console.log("- Create proposals to grant operational roles (MINTER_ROLE, etc.)");
-      console.log("- Test governance voting process");
-      console.log("- Set up monitoring for important events");
-      console.log("- Document emergency procedures");
+      process.exit(1);
     }
-
-  } catch (error) {
-    console.error("❌ Verification failed:", error);
-    throw error;
+    
+  } catch (error: any) {
+    console.error("\nDeployment failed with error:");
+    console.error(error);
+    process.exit(1);
   }
 }
 
-// Execute verification
-if (require.main === module) {
-  main()
-    .then(() => {
-      console.log("\n✅ Verification completed!");
-      process.exit(0);
-    })
-    .catch((error) => {
-      console.error("\n❌ Verification failed:", error);
-      process.exit(1);
-    });
-}
-
-export default main;
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

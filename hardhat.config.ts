@@ -3,6 +3,9 @@ import "@nomicfoundation/hardhat-toolbox";
 import "hardhat-gas-reporter";
 import "solidity-coverage";
 import "hardhat-contract-sizer";
+import "@openzeppelin/hardhat-upgrades";  // This is crucial!
+import * as dotenv from "dotenv";
+dotenv.config();
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -39,6 +42,14 @@ const config: HardhatUserConfig = {
           "dd5759e7d274c67969da1cb23df8abd3b2e7dcbea8d3e6805e8688bba77c765e"
         ],
       chainId: 11155111,
+      gasPrice: "auto",
+      gas: "auto"
+    },
+     selendra: {
+      url: process.env.SELENDRA_RPC || "https://rpcx.selendra.org",
+      accounts: 
+        process.env.SELENDRA_PRIVATE_KEY ? [process.env.SELENDRA_PRIVATE_KEY] : [],
+      chainId: 1961,
       gasPrice: "auto",
       gas: "auto"
     },

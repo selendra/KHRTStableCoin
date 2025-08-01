@@ -12,8 +12,9 @@
     "test:gas": "REPORT_GAS=true hardhat test",
     "compile": "hardhat compile",
     "deploy:local": "hardhat run scripts/deploy.ts",
-    "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet",
-    "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
+    "deploy:selendra": "hardhat run scripts/deploy.ts --network selendra",
+    "deploy:erc20": "hardhat run scripts/erc20Deploy.ts --network selendra",
+    "whitelist:selendra": "hardhat run scripts/whiteList.ts --network selendra",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
     "node": "hardhat node",
     "clean": "hardhat clean"
@@ -28,6 +29,9 @@
     "hardhat-contract-sizer": "^2.10.0"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.3.0"
+    "@openzeppelin/contracts": "^5.3.0",
+    "@openzeppelin/contracts-upgradeable": "^5.3.0",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
+    "dotenv": "^17.2.0"
   }
 }

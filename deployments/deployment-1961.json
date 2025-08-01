@@ -1,0 +1,23 @@
+{
+  "network": "selendra",
+  "chainId": "1961",
+  "deployer": "0xCf56B0D18f6e98165b772238E19502a3ee131948",
+  "timestamp": "2025-07-25T08:16:56.444Z",
+  "contracts": {
+    "KHRT": {
+      "proxy": "0xb117A52dB364837A75D5d3c41F93AF8A7f3C3E20",
+      "implementation": "0x96b25aBDA373981A2997E124bbfF818c4336739A",
+      "name": "KHRT Stablecoin",
+      "symbol": "KHRT",
+      "decimals": 6,
+      "owner": "0xCf56B0D18f6e98165b772238E19502a3ee131948",
+      "maxSupply": "40000000000000000"
+    },
+    "CollateralMinter": {
+      "address": "0xCC7991724dC0bb829970e3195bd5FCe7C166EB2a",
+      "khrtToken": "0xb117A52dB364837A75D5d3c41F93AF8A7f3C3E20",
+      "minCollateralRatio": "10000",
+      "authorized": true
+    }
+  }
+}

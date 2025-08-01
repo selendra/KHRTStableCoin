@@ -1,725 +1,480 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
+import { KHRTStablecoin, KHRTCollateralManager, MockERC20 } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
-import {
-  RoleController,
-  CouncilGovernance,
-  KHRTStableCoin,
-} from "../typechain-types";
-import { TEST_CONSTANTS, ROLE_NAMES, TEST_ACCOUNTS } from "./fixtures/data";
-import { time } from "@nomicfoundation/hardhat-network-helpers";
 
-describe("KHRT Integration Tests", function () {
-  let accounts: SignerWithAddress[];
-  let deployer: SignerWithAddress;
-  let emergencyAdmin: SignerWithAddress;
-  let councilMembers: SignerWithAddress[];
-  let users: SignerWithAddress[];
-  let minter: SignerWithAddress;
+describe("KHRT System Integration Tests", function () {
+  let khrtToken: KHRTStablecoin;
+  let collateralManager: KHRTCollateralManager;
+  let mockUSDC: MockERC20;
+  let mockUSDT: MockERC20;
+  let mockWETH: MockERC20;
+  let owner: SignerWithAddress;
+  let user1: SignerWithAddress;
+  let user2: SignerWithAddress;
+  let user3: SignerWithAddress;
 
-  let roleController: RoleController;
-  let governance: CouncilGovernance;
-  let stablecoin: KHRTStableCoin;
-
-  // Test data
-  const maxSupply = TEST_CONSTANTS.MAX_SUPPLY;
-  const councilPowers = [100, 75, 50]; // Total: 225
-  const totalVotingPower = 225;
-  const quorumRequired = Math.floor((225 * 60) / 100); // 60% of 225 = 135
-
+  const USDC_DECIMALS = 6;
+  const USDT_DECIMALS = 6;
+  const WETH_DECIMALS = 18;
+  const KHRT_DECIMALS = 6;
+  
+  // Collateral ratios (KHRT per 1 token)
+  const STABLECOIN_RATIO = 1; // 1 USDC/USDT = 1 KHRT
+  const WETH_RATIO = 2000; // 1 ETH = 2000 KHRT
+  
   beforeEach(async function () {
-    accounts = await ethers.getSigners();
-    deployer = accounts[TEST_ACCOUNTS.DEPLOYER];
-    emergencyAdmin = accounts[TEST_ACCOUNTS.EMERGENCY_ADMIN];
-    councilMembers = [
-      accounts[TEST_ACCOUNTS.COUNCIL_MEMBER_1],
-      accounts[TEST_ACCOUNTS.COUNCIL_MEMBER_2],
-      accounts[TEST_ACCOUNTS.COUNCIL_MEMBER_3],
-    ];
-    users = [accounts[TEST_ACCOUNTS.USER_1], accounts[TEST_ACCOUNTS.USER_2]];
-    minter = accounts[TEST_ACCOUNTS.MINTER];
+    [owner, user1, user2, user3] = await ethers.getSigners();
 
-    // Deploy full system
-    const RoleController = await ethers.getContractFactory("RoleController");
-    const CouncilGovernance = await ethers.getContractFactory(
-      "CouncilGovernance"
-    );
-    const KHRTStableCoin = await ethers.getContractFactory("KHRTStableCoin");
+    // Deploy all contracts
+    const KHRTStablecoin = await ethers.getContractFactory("KHRTStablecoin");
+    khrtToken = await KHRTStablecoin.deploy("KHRT Testing","TKHR");
+    await khrtToken.waitForDeployment();
 
-    roleController = await RoleController.deploy(
-      ethers.ZeroAddress,
-      emergencyAdmin.address,
-      []
-    );
+    const KHRTCollateralManager = await ethers.getContractFactory("KHRTCollateralManager");
+    collateralManager = await KHRTCollateralManager.deploy(await khrtToken.getAddress());
+    await collateralManager.waitForDeployment();
 
-    governance = await CouncilGovernance.deploy(
-      await roleController.getAddress(),
-      councilMembers.map((m) => m.address),
-      councilPowers
-    );
+    // Deploy mock tokens
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    mockUSDC = await MockERC20.deploy("Mock USDC", "USDC", USDC_DECIMALS);
+    await mockUSDC.waitForDeployment();
+    
+    mockUSDT = await MockERC20.deploy("Mock USDT", "USDT", USDT_DECIMALS);
+    await mockUSDT.waitForDeployment();
+    
+    mockWETH = await MockERC20.deploy("Mock WETH", "WETH", WETH_DECIMALS);
+    await mockWETH.waitForDeployment();
 
-    stablecoin = await KHRTStableCoin.deploy(
-      maxSupply,
-      emergencyAdmin.address,
-      await roleController.getAddress(),
-      "KHRT Stablecoin",
-      "KHRT"
-    );
-
-    // Complete integration setup
-    await roleController.updateGovernanceContract(
-      await governance.getAddress()
-    );
-    await roleController.authorizeContract(await stablecoin.getAddress(), true);
-    await roleController.authorizeContract(await governance.getAddress(), true);
-    await roleController.endSetupPhase();
+    // Setup system
+    await setupSystem();
   });
 
-  describe("Governance Voting Process", function () {
-    it("Should complete full role grant proposal lifecycle", async function () {
-      const minterRole = await roleController.MINTER_ROLE();
+  async function setupSystem() {
+    // Authorize collateral manager
+    await khrtToken.setCollateralMinter(await collateralManager.getAddress(), true);
 
-      // 1. Create proposal
-      await expect(
-        governance
-          .connect(councilMembers[0])
-          .proposeRoleChange(
-            minterRole,
-            minter.address,
-            true,
-            "Grant minter role for initial token distribution"
-          )
-      )
-        .to.emit(governance, "ProposalCreated")
-        .withArgs(0, councilMembers[0].address, 0);
+    // Whitelist tokens
+    await khrtToken.setTokenWhitelist(await mockUSDC.getAddress(), true);
+    await khrtToken.setTokenWhitelist(await mockUSDT.getAddress(), true);
+    await khrtToken.setTokenWhitelist(await mockWETH.getAddress(), true);
 
-      // 2. Check proposal state
-      const [
-        proposer,
-        proposalType,
-        state,
-        deadline,
-        executeTime,
-        forVotes,
-        againstVotes,
-      ] = await governance.getProposalState(0);
+    // Set collateral ratios using the new decimal-aware function
+    await collateralManager.setCollateralRatio(await mockUSDC.getAddress(), STABLECOIN_RATIO);
+    await collateralManager.setCollateralRatio(await mockUSDT.getAddress(), STABLECOIN_RATIO);
+    await collateralManager.setCollateralRatio(await mockWETH.getAddress(), WETH_RATIO);
 
-      expect(proposer).to.equal(councilMembers[0].address);
-      expect(proposalType).to.equal(0); // ROLE_CHANGE
-      expect(state).to.equal(1); // ACTIVE
-      expect(forVotes).to.equal(0);
-      expect(againstVotes).to.equal(0);
+    // Mint tokens to users
+    const stablecoinAmount = ethers.parseUnits("100000", 6); // 100k stablecoins
+    const ethAmount = ethers.parseUnits("100", 18); // 100 ETH
 
-      // 3. Vote - Council member 0 (power 100) votes for
-      await expect(governance.connect(councilMembers[0]).vote(0, true))
-        .to.emit(governance, "VoteCast")
-        .withArgs(0, councilMembers[0].address, true, 100);
+    for (const user of [user1, user2, user3]) {
+      await mockUSDC.mint(user.address, stablecoinAmount);
+      await mockUSDT.mint(user.address, stablecoinAmount);
+      await mockWETH.mint(user.address, ethAmount);
+    }
+  }
 
-      // 4. Vote - Council member 1 (power 75) votes for
-      await expect(governance.connect(councilMembers[1]).vote(0, true))
-        .to.emit(governance, "VoteCast")
-        .withArgs(0, councilMembers[1].address, true, 75);
+  describe("Complete User Journey", function () {
+    it("Should allow complete deposit-withdraw cycle with multiple collaterals", async function () {
+      const usdcAmount = ethers.parseUnits("1000", USDC_DECIMALS); // 1000 USDC
+      const ethAmount = ethers.parseUnits("1", WETH_DECIMALS); // 1 ETH
+      
+      // Expected KHRT amounts based on ratios and decimal handling
+      const expectedKHRTFromUSDC = ethers.parseUnits("1000", KHRT_DECIMALS); // 1000 USDC * 1 = 1000 KHRT
+      const expectedKHRTFromETH = ethers.parseUnits("2000", KHRT_DECIMALS); // 1 ETH * 2000 = 2000 KHRT
 
-      // 5. Check if proposal succeeded (100 + 75 = 175 > 135 quorum)
-      const [, , newState, , , newForVotes] = await governance.getProposalState(
-        0
-      );
-      expect(newState).to.equal(3); // SUCCEEDED
-      expect(newForVotes).to.equal(175);
+      // === DEPOSIT PHASE ===
+      
+      // Deposit USDC
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), usdcAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), usdcAmount);
 
-      // 6. Try to execute before timelock
-      await expect(governance.execute(0)).to.be.revertedWithCustomError(
-        governance,
-        "NotReady"
-      );
+      // Check USDC deposit result
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(expectedKHRTFromUSDC);
 
-      // 7. Fast forward past timelock
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
+      // Deposit WETH
+      await mockWETH.connect(user1).approve(await collateralManager.getAddress(), ethAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockWETH.getAddress(), ethAmount);
 
-      // 8. Execute proposal
-      await expect(governance.execute(0))
-        .to.emit(governance, "ProposalExecuted")
-        .withArgs(0, true);
+      // Check total KHRT balance after both deposits
+      const totalExpectedKHRT = expectedKHRTFromUSDC + expectedKHRTFromETH;
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(totalExpectedKHRT);
 
-      // 9. Verify role was granted
+      // === TRANSFER PHASE ===
+      
+      // Transfer some KHRT to user2
+      const transferAmount = ethers.parseUnits("500", KHRT_DECIMALS);
+      await khrtToken.connect(user1).transfer(user2.address, transferAmount);
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(transferAmount);
 
-      expect(await stablecoin.hasRoleView(minterRole, minter.address)).to.be
-        .true;
+      // === PARTIAL WITHDRAWAL PHASE ===
+      
+      // Withdraw half of USDC position
+      const partialWithdraw = ethers.parseUnits("500", KHRT_DECIMALS);
+      await khrtToken.connect(user1).approve(await collateralManager.getAddress(), partialWithdraw);
+      await collateralManager.connect(user1).withdrawCollateral(await mockUSDC.getAddress(), partialWithdraw);
 
-      // 10. Verify stablecoin can check the role
-      expect(await stablecoin.hasRoleView(minterRole, minter.address)).to.be
-        .true;
+      // Check remaining USDC position
+      const usdcPosition = await collateralManager.getUserPosition(user1.address, await mockUSDC.getAddress());
+      expect(usdcPosition.mintedAmount).to.equal(ethers.parseUnits("500", KHRT_DECIMALS));
+      expect(usdcPosition.collateralBalance).to.equal(ethers.parseUnits("500", USDC_DECIMALS));
+
+      // === FINAL BALANCE CHECK ===
+      
+      // User1 should have: 3000 - 500 (transfer) - 500 (withdrawal) = 2000 KHRT remaining
+      const remainingKHRT = await khrtToken.balanceOf(user1.address);
+      expect(remainingKHRT).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
+      
+      // Verify WETH position is still active
+      const wethPosition = await collateralManager.getUserPosition(user1.address, await mockWETH.getAddress());
+      expect(wethPosition.mintedAmount).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
+      expect(wethPosition.collateralBalance).to.equal(ethAmount);
+      
+      // User2 should have the transferred amount
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(transferAmount);
     });
 
-    it("Should handle proposal defeat correctly", async function () {
-      const blacklistRole = await roleController.BLACKLIST_ROLE();
+    it("Should handle complex multi-user scenarios", async function () {
+      // User1: Conservative strategy with stablecoins
+      const user1USDCAmount = ethers.parseUnits("500", USDC_DECIMALS);
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), user1USDCAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), user1USDCAmount);
 
-      // Create proposal
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          blacklistRole,
-          users[0].address,
-          true,
-          "Grant blacklist role"
-        );
+      // User2: Aggressive strategy with ETH
+      const user2ETHAmount = ethers.parseUnits("1", WETH_DECIMALS);
+      await mockWETH.connect(user2).approve(await collateralManager.getAddress(), user2ETHAmount);
+      await collateralManager.connect(user2).depositCollateral(await mockWETH.getAddress(), user2ETHAmount);
 
-      // Vote against with majority
-      await governance.connect(councilMembers[0]).vote(0, false); // 100 against
-      await governance.connect(councilMembers[1]).vote(0, false); // 75 against
-      // Total against: 175 > quorum, and against > for
+      // User3: Mixed strategy
+      const user3USDTAmount = ethers.parseUnits("200", USDT_DECIMALS);
+      const user3ETHAmount = ethers.parseUnits("0.5", WETH_DECIMALS);
+      
+      await mockUSDT.connect(user3).approve(await collateralManager.getAddress(), user3USDTAmount);
+      await collateralManager.connect(user3).depositCollateral(await mockUSDT.getAddress(), user3USDTAmount);
+      
+      await mockWETH.connect(user3).approve(await collateralManager.getAddress(), user3ETHAmount);
+      await collateralManager.connect(user3).depositCollateral(await mockWETH.getAddress(), user3ETHAmount);
 
-      const [, , state, , , forVotes, againstVotes] =
-        await governance.getProposalState(0);
-      expect(state).to.equal(2); // DEFEATED
-      expect(forVotes).to.equal(0);
-      expect(againstVotes).to.equal(175);
+      // Check individual balances
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("500", KHRT_DECIMALS)); // 500 USDC * 1
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS)); // 1 ETH * 2000
+      expect(await khrtToken.balanceOf(user3.address)).to.equal(ethers.parseUnits("1200", KHRT_DECIMALS)); // 200 USDT * 1 + 0.5 ETH * 2000
 
-      // Should not be able to execute defeated proposal
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await expect(governance.execute(0)).to.be.revertedWithCustomError(
-        governance,
-        "NotReady"
-      );
-    });
+      // Check total supply
+      const totalExpected = ethers.parseUnits("3700", KHRT_DECIMALS);
+      expect(await khrtToken.totalSupply()).to.equal(totalExpected);
 
-    it("Should handle council member addition through governance", async function () {
-      const newMember = users[0].address;
-      const newPower = 60;
+      // === TRANSFER LOGIC ===
+      
+      // Cross-transfers between users
+      await khrtToken.connect(user2).transfer(user1.address, ethers.parseUnits("500", KHRT_DECIMALS)); // User2: 2000->1500, User1: 500->1000
+      await khrtToken.connect(user3).transfer(user2.address, ethers.parseUnits("200", KHRT_DECIMALS)); // User3: 1200->1000, User2: 1500->1700
 
-      // Create add member proposal
-      await governance
-        .connect(councilMembers[0])
-        .proposeAddMember(
-          newMember,
-          newPower,
-          "Add new qualified council member"
-        );
+      // Batch transfer from user1
+      const recipients = [user2.address, user3.address];
+      const amounts = [ethers.parseUnits("400", KHRT_DECIMALS), ethers.parseUnits("300", KHRT_DECIMALS)];
+      await khrtToken.connect(user1).batchTransfer(recipients, amounts);
 
-      // Vote for the proposal (need majority)
-      await governance.connect(councilMembers[0]).vote(0, true); // 100
-      await governance.connect(councilMembers[1]).vote(0, true); // 75
-      // Total: 175 > 135 quorum
-
-      // Fast forward and execute
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-
-      await expect(governance.execute(0))
-        .to.emit(governance, "CouncilAdded")
-        .withArgs(newMember, newPower);
-
-      // Verify member was added
-      const [isActive, power, joinedAt] = await governance.getCouncilInfo(
-        newMember
-      );
-      expect(isActive).to.be.true;
-      expect(power).to.equal(newPower);
-      expect(joinedAt).to.be.gt(0);
-
-      // Verify council stats updated
-      expect(await governance.activeMembers()).to.equal(4);
-      expect(await governance.totalVotingPower()).to.equal(285); // 225 + 60
-
-      // Verify new member can vote on proposals
-      const minterRole = await roleController.MINTER_ROLE();
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          users[1].address,
-          true,
-          "Test new member voting"
-        );
-
-      await expect(governance.connect(users[0]).vote(1, true))
-        .to.emit(governance, "VoteCast")
-        .withArgs(1, newMember, true, newPower);
-    });
-
-    it("Should handle council member removal through governance", async function () {
-      // First add a new member so we can remove one without going below minimum
-      const newMember = users[0].address;
-      const newPower = 60;
-
-      await governance
-        .connect(councilMembers[0])
-        .proposeAddMember(newMember, newPower, "Add new member first");
-
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
-
-      // Now remove the original member
-      const memberToRemove = councilMembers[2].address;
-
-      await governance
-        .connect(councilMembers[0])
-        .proposeRemoveMember(memberToRemove, "Remove inactive council member");
-
-      await governance.connect(councilMembers[0]).vote(1, true);
-      await governance.connect(councilMembers[1]).vote(1, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-
-      await expect(governance.execute(1))
-        .to.emit(governance, "CouncilRemoved")
-        .withArgs(memberToRemove);
-
-      const [isActive, ,] = await governance.getCouncilInfo(memberToRemove);
-
-      expect(isActive).to.be.false;
-
-      // Verify council stats updated
-      expect(await governance.activeMembers()).to.equal(3);
-      expect(await governance.totalVotingPower()).to.equal(235); // 225 + 60 - 50
-
-      // Verify removed member cannot vote
-      const minterRole = await roleController.MINTER_ROLE();
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          users[1].address,
-          true,
-          "Test removed member cannot vote"
-        );
-
-      await expect(
-        governance.connect(councilMembers[2]).vote(2, true)
-      ).to.be.revertedWithCustomError(governance, "NotCouncil");
+      // Verify final balances after transfers
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("300", KHRT_DECIMALS)); // 1000 - 700
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2100", KHRT_DECIMALS)); // 1700 + 400
+      expect(await khrtToken.balanceOf(user3.address)).to.equal(ethers.parseUnits("1300", KHRT_DECIMALS)); // 1000 + 300
+      
+      // Total supply should remain the same
+      expect(await khrtToken.totalSupply()).to.equal(totalExpected);
     });
   });
 
-  describe("End-to-End Token Operations", function () {
-    beforeEach(async function () {
-      // Grant minter role through governance
-      const minterRole = await roleController.MINTER_ROLE();
+  describe("System Stress Tests", function () {
+    it("Should handle rapid deposit/withdrawal cycles", async function () {
+      const baseAmount = ethers.parseUnits("100", USDC_DECIMALS);
+      const usdcAddress = await mockUSDC.getAddress();
 
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          minter.address,
-          true,
-          "Grant minter role"
-        );
+      for (let i = 0; i < 10; i++) {
+        // Deposit
+        await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), baseAmount);
+        await collateralManager.connect(user1).depositCollateral(usdcAddress, baseAmount);
 
-      // Vote and execute
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
+        // Partial withdrawal (50 KHRT = 50 USDC with 1:1 ratio)
+        const withdrawAmount = ethers.parseUnits("50", KHRT_DECIMALS);
+        await khrtToken.connect(user1).approve(await collateralManager.getAddress(), withdrawAmount);
+        await collateralManager.connect(user1).withdrawCollateral(usdcAddress, withdrawAmount);
+      }
 
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
+      // Final check - net: 10 * (100 deposit - 50 withdraw) = 500
+      const position = await collateralManager.getUserPosition(user1.address, usdcAddress);
+      expect(position.mintedAmount).to.equal(ethers.parseUnits("500", KHRT_DECIMALS));
+      expect(position.collateralBalance).to.equal(ethers.parseUnits("500", USDC_DECIMALS));
     });
 
-    it("Should allow complete mint and transfer flow", async function () {
-      const mintAmount = ethers.parseEther("1000");
+    it("Should handle maximum supply scenarios", async function () {
+      // Try to mint close to max supply
+      const maxSupply = await khrtToken.getMaxSupply();
+      const largeAmount = maxSupply / 2n; // Half of max supply
 
-      // Mint tokens
-      await expect(
-        stablecoin.connect(minter).mint(users[0].address, mintAmount)
-      )
-        .to.emit(stablecoin, "Mint")
-        .withArgs(users[0].address, mintAmount, minter.address);
+      // Calculate required collateral (1:1 ratio for USDC with same decimals)
+      const requiredUSDC = largeAmount;
 
-      expect(await stablecoin.balanceOf(users[0].address)).to.equal(mintAmount);
-      expect(await stablecoin.totalSupply()).to.equal(mintAmount);
+      // Mint enough USDC
+      await mockUSDC.mint(user1.address, requiredUSDC);
+      
+      // Deposit and mint large amount
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), requiredUSDC);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), requiredUSDC);
 
-      // Transfer tokens
-      const transferAmount = ethers.parseEther("200");
-      await expect(
-        stablecoin.connect(users[0]).transfer(users[1].address, transferAmount)
-      )
-        .to.emit(stablecoin, "Transfer")
-        .withArgs(users[0].address, users[1].address, transferAmount);
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(largeAmount);
 
-      expect(await stablecoin.balanceOf(users[0].address)).to.equal(
-        mintAmount - transferAmount
-      );
-      expect(await stablecoin.balanceOf(users[1].address)).to.equal(
-        transferAmount
-      );
-
-      // Burn tokens
-      const burnAmount = ethers.parseEther("50");
-      await expect(stablecoin.connect(users[1]).burn(burnAmount))
-        .to.emit(stablecoin, "Burn")
-        .withArgs(users[1].address, burnAmount, users[1].address);
-
-      expect(await stablecoin.balanceOf(users[1].address)).to.equal(
-        transferAmount - burnAmount
-      );
-      expect(await stablecoin.totalSupply()).to.equal(mintAmount - burnAmount);
-    });
-
-    it("Should respect max supply limits", async function () {
-      const mintAmount = maxSupply + ethers.parseEther("1");
-
-      await expect(
-        stablecoin.connect(minter).mint(users[0].address, mintAmount)
-      ).to.be.revertedWithCustomError(stablecoin, "ExceedsMaxSupply");
-    });
-
-    it("Should handle blacklisting through governance", async function () {
-      const blacklistRole = await roleController.BLACKLIST_ROLE();
-
-      // Grant blacklist role through governance
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          blacklistRole,
-          emergencyAdmin.address,
-          true,
-          "Grant blacklist role to emergency admin"
-        );
-
-      await governance.connect(councilMembers[0]).vote(1, true);
-      await governance.connect(councilMembers[1]).vote(1, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(1);
-
-      // Mint some tokens first
-      const mintAmount = ethers.parseEther("1000");
-      await stablecoin.connect(minter).mint(users[0].address, mintAmount);
-
-      // Blacklist user
-      await expect(
-        stablecoin
-          .connect(emergencyAdmin)
-          .updateBlacklist(users[0].address, true)
-      )
-        .to.emit(stablecoin, "BlacklistUpdated")
-        .withArgs(users[0].address, true);
-
-      // Blacklisted user cannot transfer
-      await expect(
-        stablecoin
-          .connect(users[0])
-          .transfer(users[1].address, ethers.parseEther("100"))
-      ).to.be.revertedWithCustomError(stablecoin, "AccountBlacklisted");
-
-      // Cannot mint to blacklisted user
-      await expect(
-        stablecoin
-          .connect(minter)
-          .mint(users[0].address, ethers.parseEther("100"))
-      ).to.be.revertedWithCustomError(stablecoin, "AccountBlacklisted");
-
-      // Remove from blacklist
-      await stablecoin
-        .connect(emergencyAdmin)
-        .updateBlacklist(users[0].address, false);
-
-      // Should work again
-      await expect(
-        stablecoin
-          .connect(users[0])
-          .transfer(users[1].address, ethers.parseEther("100"))
-      ).to.emit(stablecoin, "Transfer");
+      // Try to mint more than max supply should fail
+      const excessAmount = maxSupply - largeAmount + ethers.parseUnits("1", KHRT_DECIMALS);
+      const excessUSDC = excessAmount; // 1:1 ratio
+      
+      await mockUSDC.mint(user2.address, excessUSDC);
+      await mockUSDC.connect(user2).approve(await collateralManager.getAddress(), excessUSDC);
+      
+      await expect(collateralManager.connect(user2).depositCollateral(await mockUSDC.getAddress(), excessUSDC))
+        .to.be.revertedWith("KHRT: Exceeds maximum supply");
     });
   });
 
-  describe("Emergency Coordination", function () {
-    it("Should coordinate emergency modes across system", async function () {
-      // First grant blacklist role to emergency admin
-      const blacklistRole = await roleController.BLACKLIST_ROLE();
+  describe("Security and Edge Cases", function () {
+    it("Should prevent unauthorized minting", async function () {
+      // Try to mint directly without being authorized
+      await expect(khrtToken.connect(user1).mint(user1.address, ethers.parseUnits("1000", KHRT_DECIMALS)))
+        .to.be.revertedWith("KHRT: Unauthorized normal minter");
 
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          blacklistRole,
-          emergencyAdmin.address,
-          true,
-          "Grant blacklist role"
-        );
-
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
-
-      // Now test emergency coordination
-      expect(await roleController.isEmergencyMode()).to.be.false;
-      expect(await stablecoin.isEmergencyMode()).to.be.false;
-
-      // Activate role controller emergency
-      await roleController.connect(emergencyAdmin).toggleEmergencyMode(true);
-
-      expect(await roleController.isEmergencyMode()).to.be.true;
-      expect(await stablecoin.isEmergencyMode()).to.be.true;
-
-      // Stablecoin operations should be blocked
-      await expect(
-        stablecoin
-          .connect(emergencyAdmin)
-          .updateBlacklist(users[0].address, true)
-      ).to.be.revertedWithCustomError(stablecoin, "EmergencyModeActive");
-
-      // Clear emergency
-      await roleController.connect(emergencyAdmin).toggleEmergencyMode(false);
-      expect(await roleController.isEmergencyMode()).to.be.false;
-      expect(await stablecoin.isEmergencyMode()).to.be.false;
+      // Try collateral minting without authorization
+      await expect(khrtToken.connect(user1).mintWithCollateral(
+        user1.address, 
+        ethers.parseUnits("1000", KHRT_DECIMALS), 
+        await mockUSDC.getAddress()
+      )).to.be.revertedWith("KHRT: Unauthorized collateral minter");
     });
 
-    it("Should handle local stablecoin emergency independently", async function () {
-      // First grant blacklist role to emergency admin
-      const blacklistRole = await roleController.BLACKLIST_ROLE();
+    it("Should handle blacklisted users properly", async function () {
+      // Setup position for user1
+      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), depositAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), depositAmount);
 
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          blacklistRole,
-          emergencyAdmin.address,
-          true,
-          "Grant blacklist role"
-        );
+      // Blacklist user1
+      await khrtToken.setUserBlacklist(user1.address, true);
 
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
+      // Should not be able to transfer
+      await expect(khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS)))
+        .to.be.revertedWith("KHRT: Address is blacklisted");
 
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
+      // Should not be able to receive transfers
+      await expect(khrtToken.connect(user2).transfer(user1.address, ethers.parseUnits("100", KHRT_DECIMALS)))
+        .to.be.revertedWith("KHRT: Address is blacklisted");
 
-      // Activate only local stablecoin emergency
-      await stablecoin.connect(emergencyAdmin).toggleLocalEmergency(true);
-
-      expect(await roleController.isEmergencyMode()).to.be.false;
-      expect(await stablecoin.isEmergencyMode()).to.be.true;
-
-      // Stablecoin operations blocked
-      await expect(
-        stablecoin
-          .connect(emergencyAdmin)
-          .updateBlacklist(users[0].address, true)
-      ).to.be.revertedWithCustomError(stablecoin, "EmergencyModeActive");
-
-      // But governance still works
-      const minterRole = await roleController.MINTER_ROLE();
-      await expect(
-        governance
-          .connect(councilMembers[0])
-          .proposeRoleChange(
-            minterRole,
-            users[0].address,
-            true,
-            "Test during local emergency"
-          )
-      ).to.emit(governance, "ProposalCreated");
+      // Remove from blacklist and operations should work
+      await khrtToken.setUserBlacklist(user1.address, false);
+      await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS));
     });
 
-    it("Should handle pause/unpause correctly", async function () {
-      // Pause stablecoin
-      await stablecoin.connect(emergencyAdmin).pause();
-      expect(await stablecoin.paused()).to.be.true;
-      expect(await stablecoin.isEmergencyMode()).to.be.true;
+    it("Should handle paused system correctly", async function () {
+      // Setup position
+      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), depositAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), depositAmount);
 
-      // Cannot transfer when paused
-      await expect(stablecoin.connect(users[0]).transfer(users[1].address, 100))
-        .to.be.reverted;
+      // Pause both contracts
+      await khrtToken.pause();
+      await collateralManager.pause();
 
-      // Unpause
-      await stablecoin.connect(emergencyAdmin).unpause();
-      expect(await stablecoin.paused()).to.be.false;
+      // Should reject all operations
+      await expect(khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS)))
+        .to.be.revertedWithCustomError(khrtToken, "EnforcedPause");
+
+      await expect(collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), depositAmount))
+        .to.be.revertedWithCustomError(collateralManager, "EnforcedPause");
+
+      // Unpause and operations should work
+      await khrtToken.unpause();
+      await collateralManager.unpause();
+
+      await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS));
+    });
+
+    it("Should handle token ratio changes correctly", async function () {
+      // Initial deposit with ratio 1:1
+      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), depositAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), depositAmount);
+
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000", KHRT_DECIMALS));
+
+      // Change ratio to 2:1 (1 USDC = 2 KHRT)
+      const newRatio = 2;
+      await collateralManager.setCollateralRatio(await mockUSDC.getAddress(), newRatio);
+
+      // New deposits should use new ratio
+      await mockUSDC.connect(user2).approve(await collateralManager.getAddress(), depositAmount);
+      await collateralManager.connect(user2).depositCollateral(await mockUSDC.getAddress(), depositAmount);
+
+      // 1000 USDC * 2 = 2000 KHRT
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
+
+      // Existing positions should still work with their original terms
+      const user1Position = await collateralManager.getUserPosition(user1.address, await mockUSDC.getAddress());
+      expect(user1Position.mintedAmount).to.equal(ethers.parseUnits("1000", KHRT_DECIMALS));
     });
   });
 
-  describe("Complex Governance Scenarios", function () {
-    it("Should handle role revocation through governance", async function () {
-      const minterRole = await roleController.MINTER_ROLE();
+  describe("Decimal Precision Tests", function () {
+    it("Should handle different token decimals correctly", async function () {
+      // Test USDC (6 decimals) -> KHRT (6 decimals) with 1:1 ratio
+      const usdcAmount = ethers.parseUnits("1000.123456", USDC_DECIMALS);
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), usdcAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockUSDC.getAddress(), usdcAmount);
+      
+      const usdcKHRT = await khrtToken.balanceOf(user1.address);
+      expect(usdcKHRT).to.equal(ethers.parseUnits("1000.123456", KHRT_DECIMALS));
 
-      // First grant the role
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          minter.address,
-          true,
-          "Grant minter role"
-        );
-
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
-
-      expect(await stablecoin.hasRoleView(minterRole, minter.address)).to.be
-        .true;
-
-      // Now revoke the role
-      await governance.connect(councilMembers[0]).proposeRoleChange(
-        minterRole,
-        minter.address,
-        false, // isGrant = false
-        "Revoke minter role due to security concerns"
-      );
-
-      await governance.connect(councilMembers[0]).vote(1, true);
-      await governance.connect(councilMembers[1]).vote(1, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(1);
-
-      expect(await stablecoin.hasRoleView(minterRole, minter.address)).to.be
-        .false;
-
-      // Should not be able to mint anymore
-      await expect(
-        stablecoin
-          .connect(minter)
-          .mint(users[0].address, ethers.parseEther("100"))
-      ).to.be.revertedWithCustomError(stablecoin, "UnauthorizedAccess");
+      // Test WETH (18 decimals) -> KHRT (6 decimals) with 2000:1 ratio
+      const wethAmount = ethers.parseUnits("1.123456789012345678", WETH_DECIMALS);
+      await mockWETH.connect(user2).approve(await collateralManager.getAddress(), wethAmount);
+      await collateralManager.connect(user2).depositCollateral(await mockWETH.getAddress(), wethAmount);
+      
+      // Expected: 1.123456789012345678 * 2000 = 2246.913578024691356 KHRT
+      // But KHRT only has 6 decimals, so it should be 2246.913578 KHRT
+      const expectedWethKHRT = ethers.parseUnits("2246.913578", KHRT_DECIMALS);
+      const wethKHRT = await khrtToken.balanceOf(user2.address);
+      expect(wethKHRT).to.equal(expectedWethKHRT);
     });
 
-    it("Should handle failed governance execution gracefully", async function () {
-      // First mint some tokens to create supply
-      const minterRole = await roleController.MINTER_ROLE();
+    it("Should handle withdrawal calculations with precision", async function () {
+      // Deposit WETH and test withdrawal precision
+      const wethAmount = ethers.parseUnits("1.5", WETH_DECIMALS);
+      await mockWETH.connect(user1).approve(await collateralManager.getAddress(), wethAmount);
+      await collateralManager.connect(user1).depositCollateral(await mockWETH.getAddress(), wethAmount);
 
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          emergencyAdmin.address,
-          true,
-          "Grant minter role"
-        );
+      const khrtBalance = await khrtToken.balanceOf(user1.address);
+      expect(khrtBalance).to.equal(ethers.parseUnits("3000", KHRT_DECIMALS)); // 1.5 * 2000
 
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
+      // Withdraw half the KHRT
+      const withdrawAmount = ethers.parseUnits("1500", KHRT_DECIMALS);
+      await khrtToken.connect(user1).approve(await collateralManager.getAddress(), withdrawAmount);
+      await collateralManager.connect(user1).withdrawCollateral(await mockWETH.getAddress(), withdrawAmount);
 
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
-
-      // Mint some tokens first
-      await stablecoin
-        .connect(emergencyAdmin)
-        .mint(users[0].address, ethers.parseEther("1000"));
-
-      // Create execution proposal that will fail - set max supply below current supply
-      const newMaxSupply = ethers.parseEther("100"); // Lower than current supply
-      const invalidCalldata = stablecoin.interface.encodeFunctionData(
-        "updateMaxSupply",
-        [newMaxSupply]
-      );
-
-      await governance
-        .connect(councilMembers[0])
-        .proposeExecution(
-          await stablecoin.getAddress(),
-          invalidCalldata,
-          "Update max supply below current supply (will fail)"
-        );
-
-      await governance.connect(councilMembers[0]).vote(1, true);
-      await governance.connect(councilMembers[1]).vote(1, true);
-
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-
-      // Execution should fail
-      await expect(governance.execute(1)).to.be.revertedWithCustomError(
-        governance,
-        "ExecutionFailed"
-      );
+      // Should get back 0.75 ETH (1500 KHRT / 2000 ratio)
+      const wethBalance = await mockWETH.balanceOf(user1.address);
+      const expectedWethBack = ethers.parseUnits("0.75", WETH_DECIMALS);
+      
+      // Account for initial balance minus deposited amount plus withdrawn amount
+      const initialWethBalance = ethers.parseUnits("100", WETH_DECIMALS); // from setup
+      const expectedFinalBalance = initialWethBalance - wethAmount + expectedWethBack;
+      expect(wethBalance).to.equal(expectedFinalBalance);
     });
   });
 
-  describe("System Health and Diagnostics", function () {
-    it("Should provide accurate integration status", async function () {
-      const [rcAddr, isSet, isInit, hasRole] =
-        await governance.getIntegrationStatus();
+  describe("Gas Optimization Tests", function () {
+    it("Should be gas efficient for common operations", async function () {
+      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      const usdcAddress = await mockUSDC.getAddress();
 
-      expect(rcAddr).to.equal(await roleController.getAddress());
-      expect(isSet).to.be.true;
-      expect(isInit).to.be.true;
-      expect(hasRole).to.be.true;
+      // Approve once
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), depositAmount * 10n);
+
+      // Measure gas for deposit
+      const depositTx = await collateralManager.connect(user1).depositCollateral(usdcAddress, depositAmount);
+      const depositReceipt = await depositTx.wait();
+      console.log("Deposit gas used:", depositReceipt?.gasUsed?.toString());
+
+      // Measure gas for withdrawal
+      await khrtToken.connect(user1).approve(await collateralManager.getAddress(), ethers.parseUnits("500", KHRT_DECIMALS));
+      const withdrawTx = await collateralManager.connect(user1).withdrawCollateral(usdcAddress, ethers.parseUnits("500", KHRT_DECIMALS));
+      const withdrawReceipt = await withdrawTx.wait();
+      console.log("Withdrawal gas used:", withdrawReceipt?.gasUsed?.toString());
+
+      // Measure gas for transfer
+      const transferTx = await khrtToken.connect(user1).transfer(user2.address, ethers.parseUnits("100", KHRT_DECIMALS));
+      const transferReceipt = await transferTx.wait();
+      console.log("Transfer gas used:", transferReceipt?.gasUsed?.toString());
     });
 
-    it("Should track role change IDs correctly", async function () {
-      const minterRole = await roleController.MINTER_ROLE();
+    it("Should handle batch operations efficiently", async function () {
+      // Setup initial balance
+      const mintAmount = ethers.parseUnits("10000", KHRT_DECIMALS);
+      await khrtToken.connect(owner).mint(user1.address, mintAmount);
 
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          users[0].address,
-          true,
-          "Test role change tracking"
-        );
+      // Batch transfer to multiple recipients
+      const recipients = [user2.address, user3.address, owner.address];
+      const amounts = [
+        ethers.parseUnits("1000", KHRT_DECIMALS),
+        ethers.parseUnits("2000", KHRT_DECIMALS),
+        ethers.parseUnits("1500", KHRT_DECIMALS)
+      ];
 
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
+      const batchTx = await khrtToken.connect(user1).batchTransfer(recipients, amounts);
+      const batchReceipt = await batchTx.wait();
+      console.log("Batch transfer gas used:", batchReceipt?.gasUsed?.toString());
 
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
+      // Verify all transfers completed
+      expect(await khrtToken.balanceOf(user2.address)).to.equal(amounts[0]);
+      expect(await khrtToken.balanceOf(user3.address)).to.equal(amounts[1]);
+      expect(await khrtToken.balanceOf(owner.address)).to.equal(amounts[2]);
+    });
+  });
 
-      await expect(governance.execute(0)).to.emit(
-        governance,
-        "RoleChangeProposed"
-      );
+  describe("Integration with External Systems", function () {
+    it("Should work correctly with external DeFi protocols (simulated)", async function () {
+      // Simulate lending protocol interaction
+      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      const usdcAddress = await mockUSDC.getAddress();
 
-      // Should have a role change ID recorded
-      const roleChangeId = await governance.getRoleChangeId(0);
-      expect(roleChangeId).to.be.gt(0);
+      // User deposits collateral and gets KHRT
+      await mockUSDC.connect(user1).approve(await collateralManager.getAddress(), depositAmount);
+      await collateralManager.connect(user1).depositCollateral(usdcAddress, depositAmount);
+
+      const khrtBalance = await khrtToken.balanceOf(user1.address);
+
+      // Simulate lending KHRT to external protocol (approve + transferFrom pattern)
+      const lendingAmount = khrtBalance / 2n;
+      await khrtToken.connect(user1).approve(user2.address, lendingAmount); // user2 simulates lending protocol
+
+      // Lending protocol takes tokens
+      await khrtToken.connect(user2).transferFrom(user1.address, user2.address, lendingAmount);
+
+      // User should have reduced balance
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(khrtBalance - lendingAmount);
+
+      // Later, user gets tokens back with interest (simulate repayment)
+      const interest = ethers.parseUnits("50", KHRT_DECIMALS);
+      await khrtToken.connect(owner).mint(user2.address, interest); // Mint interest
+      await khrtToken.connect(user2).transfer(user1.address, lendingAmount + interest);
+
+      // User should have more than original
+      expect(await khrtToken.balanceOf(user1.address)).to.equal(khrtBalance / 2n + lendingAmount + interest);
     });
 
-    it("Should allow role change retry on failure", async function () {
-      // This test would need to simulate a role change failure
-      // For now, we'll test the function exists and has proper permissions
-      const minterRole = await roleController.MINTER_ROLE();
+    it("Should handle oracle price update scenarios", async function () {
+      // Simulate ETH price change by updating collateral ratio
+      const ethAmount = ethers.parseUnits("1", WETH_DECIMALS);
+      const wethAddress = await mockWETH.getAddress();
 
-      await governance
-        .connect(councilMembers[0])
-        .proposeRoleChange(
-          minterRole,
-          users[0].address,
-          true,
-          "Test role change retry"
-        );
+      // Initial deposit at $2000 ETH (ratio = 2000)
+      await mockWETH.connect(user1).approve(await collateralManager.getAddress(), ethAmount);
+      await collateralManager.connect(user1).depositCollateral(wethAddress, ethAmount);
 
-      await governance.connect(councilMembers[0]).vote(0, true);
-      await governance.connect(councilMembers[1]).vote(0, true);
+      const initialKHRT = await khrtToken.balanceOf(user1.address);
+      expect(initialKHRT).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
 
-      await time.increase(
-        TEST_CONSTANTS.VOTING_PERIOD + TEST_CONSTANTS.EXECUTION_DELAY
-      );
-      await governance.execute(0);
+      // Simulate ETH price increase to $3000 by updating ratio for new deposits
+      const newRatio = 3000;
+      await collateralManager.setCollateralRatio(wethAddress, newRatio);
 
-      // Should be able to call retry (even if it's not needed in this case)
-      const canRetry = await governance
-        .connect(councilMembers[0])
-        .retryRoleChange(0);
-      // Function should execute without reverting
+      // New deposits should get more KHRT
+      await mockWETH.connect(user2).approve(await collateralManager.getAddress(), ethAmount);
+      await collateralManager.connect(user2).depositCollateral(wethAddress, ethAmount);
+
+      const user2KHRT = await khrtToken.balanceOf(user2.address);
+      expect(user2KHRT).to.equal(ethers.parseUnits("3000", KHRT_DECIMALS));
+
+      // Existing positions maintain their ratios
+      const user1Position = await collateralManager.getUserPosition(user1.address, wethAddress);
+      expect(user1Position.mintedAmount).to.equal(ethers.parseUnits("2000", KHRT_DECIMALS));
     });
   });
 });
