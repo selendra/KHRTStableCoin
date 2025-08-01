@@ -23,6 +23,9 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
     // Minimum collateral ratio (100% = 10000 basis points)
     uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
     
+    // SECURITY FIX: Maximum collateral ratio to prevent inflation attacks
+    uint256 public constant MAX_COLLATERAL_RATIO = 100000000; // 10,000 KHRT per 1 token max
+    
     // Scaling factor for ratio precision (18 decimals)
     uint256 public constant RATIO_PRECISION = 1e18;
     
@@ -30,7 +33,6 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
     mapping(address => bool) public whitelistedTokens;
     
     // Collateral token address => ratio (KHRT amount per 1 collateral token, scaled by RATIO_PRECISION)
-    // Example: 1 USDT = 4000 KHRT would be stored as 4000 * 1e18
     mapping(address => uint256) public collateralRatios;
     
     // User address => collateral token => deposited amount
@@ -76,17 +78,18 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Set collateral ratio for a token
+     * SECURITY FIX: Add maximum ratio limit
      * @param token Address of the collateral token
      * @param khrtPerToken How many KHRT tokens are minted per 1 unit of collateral token
-     * Example: setCollateralRatio(USDT, 4000) for 1 USDT = 4000 KHRT
-     * Example: setCollateralRatio(ETH, 8000000) for 1 ETH = 8,000,000 KHRT
      */
     function setCollateralRatio(address token, uint256 khrtPerToken) external onlyOwner {
         require(token != address(0), "CollateralManager: Invalid token address");
         require(khrtPerToken > 0, "CollateralManager: Ratio must be greater than 0");
         require(whitelistedTokens[token], "CollateralManager: Token not whitelisted");
         
-        // Store the ratio scaled by precision factor
+        // SECURITY FIX: Prevent excessive ratios
+        require(khrtPerToken <= MAX_COLLATERAL_RATIO, "CollateralManager: Ratio exceeds maximum");
+        
         collateralRatios[token] = khrtPerToken * RATIO_PRECISION;
         emit CollateralRatioSet(token, khrtPerToken);
     }
@@ -209,8 +212,6 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Get user's collateral balance and minted amount for a token
-     * @param user Address of the user
-     * @param token Address of the collateral token
      */
     function getUserPosition(address user, address token) external view returns (
         uint256 collateralBalance,
@@ -243,13 +244,12 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
                 maxWithdrawableKHRT = 0;
             }
         } else {
-            maxWithdrawableKHRT = mintedAmount; // Can withdraw all if no collateral restrictions
+            maxWithdrawableKHRT = mintedAmount;
         }
     }
 
     /**
      * @dev Get collateral ratio for a token (KHRT per 1 token)
-     * @param token Address of the collateral token
      */
     function getCollateralRatio(address token) external view returns (uint256) {
         return collateralRatios[token] / RATIO_PRECISION;
@@ -257,17 +257,13 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Calculate how much KHRT can be minted with given collateral amount
-     * @param token Address of the collateral token
-     * @param collateralAmount Amount of collateral tokens
      */
     function calculateMintAmount(address token, uint256 collateralAmount) external view returns (uint256) {
         return calculateKHRTAmount(token, collateralAmount);
     }
 
-     /**
+    /**
      * @dev Calculate how much collateral is needed to mint given KHRT amount
-     * @param token Address of the collateral token
-     * @param khrtAmount Amount of KHRT tokens to mint
      */
     function calculateCollateralNeeded(address token, uint256 khrtAmount) external view returns (uint256) {
         return calculateCollateralAmount(token, khrtAmount);
@@ -275,7 +271,6 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Get the minimum collateral ratio requirement
-     * @return ratio Minimum collateral ratio in basis points (10000 = 100%)
      */
     function getMinimumCollateralRatio() external pure returns (uint256) {
         return MIN_COLLATERAL_RATIO;
@@ -283,23 +278,28 @@ contract CollateralMinter is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Get total collateral deposited for a token
-     * @param token Address of the collateral token
      */
     function getTotalCollateralDeposited(address token) external view returns (uint256) {
         return totalCollateralDeposited[token];
     }
 
     /**
-     * @dev Emergency withdrawal function - only owner can use this
+     * SECURITY FIX: Secure emergency withdrawal
+     * @dev Emergency withdrawal function - only excess tokens, not user deposits
      * @param token Address of the token to withdraw
      * @param amount Amount to withdraw
      */
-    function emergencyWithdraw(address token, uint256 amount) external onlyOwner {
+    function emergencyWithdraw(address token, uint256 amount) external onlyOwner whenPaused {
         require(token != address(0), "CollateralManager: Invalid token address");
         require(amount > 0, "CollateralManager: Amount must be greater than 0");
         
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        require(balance >= amount, "CollateralManager: Insufficient balance");
+        // SECURITY FIX: Only allow withdrawal of excess tokens
+        uint256 userDeposits = totalCollateralDeposited[token];
+        uint256 contractBalance = IERC20(token).balanceOf(address(this));
+        
+        require(contractBalance >= userDeposits, "CollateralManager: Contract balance less than user deposits");
+        uint256 excessTokens = contractBalance - userDeposits;
+        require(amount <= excessTokens, "CollateralManager: Cannot withdraw user deposits");
 
         IERC20(token).safeTransfer(owner(), amount);
         emit EmergencyWithdrawal(token, amount);

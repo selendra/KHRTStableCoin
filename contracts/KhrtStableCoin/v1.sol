@@ -20,10 +20,12 @@ contract KHRTStablecoinV1 is
     // State variables
     uint256 public maxSupply;
     mapping(address => bool) public authorizedMinters;
+    mapping(address => bool) public authorizedBurners; // NEW: Authorized burners
     mapping(address => bool) public blacklistedUsers;
     
     // Events
     event MinterAuthorized(address indexed minter, bool status);
+    event BurnerAuthorized(address indexed burner, bool status); // NEW: Burner authorization event
     event UserBlacklisted(address indexed user, bool status);
     event TokensMinted(address indexed to, uint256 amount);
     event TokensBurned(address indexed from, uint256 amount);
@@ -31,8 +33,8 @@ contract KHRTStablecoinV1 is
     event AdminBurnedBlacklisted(address indexed blacklistedUser, uint256 amount, address indexed admin); // NEW EVENT
     event MaxSupplyChanged(uint256 oldMaxSupply, uint256 newMaxSupply, address indexed changedBy); // UPDATED EVENT
 
-    // Storage gap for future upgrades
-    uint256[47] private __gap;
+    // Storage gap for future upgrades (reduced by 1 for authorizedBurners)
+    uint256[46] private __gap;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -133,6 +135,16 @@ contract KHRTStablecoinV1 is
     }
 
     /**
+     * @dev Authorize or revoke burning permissions
+     * @param burner Address to authorize/revoke
+     * @param status True to authorize, false to revoke
+     */
+    function setAuthorizedBurner(address burner, bool status) external onlyOwner validAddress(burner) {
+        authorizedBurners[burner] = status;
+        emit BurnerAuthorized(burner, status);
+    }
+
+    /**
      * @dev Add or remove a user from blacklist
      * @param user Address of the user
      * @param status True to blacklist, false to remove from blacklist
@@ -164,6 +176,14 @@ contract KHRTStablecoinV1 is
      */
     function isAuthorizedMinter(address minter) external view returns (bool) {
         return authorizedMinters[minter];
+    }
+
+    /**
+     * @dev Check if an address is an authorized burner
+     * @param burner Address to check
+     */
+    function isAuthorizedBurner(address burner) external view returns (bool) {
+        return authorizedBurners[burner];
     }
 
     /**
@@ -210,7 +230,7 @@ contract KHRTStablecoinV1 is
 
     /**
      * @dev Burn KHRT tokens from another address using allowance
-     * Admin can burn from blacklisted users without allowance
+     * Owner and authorized burners can burn without allowance
      * @param tokenOwner Address that owns the tokens to burn
      * @param amount Amount of tokens to burn
      */
@@ -222,7 +242,8 @@ contract KHRTStablecoinV1 is
     {
         require(balanceOf(tokenOwner) >= amount, "KHRT: Insufficient balance to burn");
         
-        if (msg.sender == owner()) {
+        if (msg.sender == owner() || authorizedBurners[msg.sender]) {
+            // Owner or authorized burner can burn without allowance
             _burn(tokenOwner, amount);
         } else {
             // Normal burnFrom with allowance check and blacklist validation

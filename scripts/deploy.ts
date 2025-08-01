@@ -18,7 +18,7 @@ async function main() {
     
     const khrtProxy = await upgrades.deployProxy(
       KHRTStablecoin,
-      ["KHRT TSTABLE", "TKHRT", deployer.address],
+      ["KHRT Stable (official)", "KHRT", deployer.address],
       { 
         initializer: "initialize",
         kind: "uups",
