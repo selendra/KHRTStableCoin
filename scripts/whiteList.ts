@@ -12,7 +12,7 @@ interface WhitelistConfig {
 // Example configurations - modify as needed
 const WHITELIST_CONFIGS: WhitelistConfig[] = [
   // Add these tokens to whitelist with their ratios
-  { token: "0x7cAe432e617189AF66b4F57a93e8d752A7ae093A", action: "add", ratio: 40 }, // Example: 1 USDT = 40 KHRT
+  { token: "0xBd8a86E2F16f5251d17348eA0F66d1400301A3bD", action: "add", ratio: 40 }, // STAR TOKEN - 1 STAR = 40 KHRT
   // { token: "0x...", action: "add", ratio: 8000000 }, // Example: 1 ETH = 8,000,000 KHRT
   // { token: "0x...", action: "remove" }, // Remove from whitelist
 ];
@@ -33,7 +33,7 @@ async function main() {
   }
 
   const deploymentInfo = JSON.parse(fs.readFileSync(deploymentFile, "utf8"));
-  const collateralMinterAddress = deploymentInfo.contracts.CollateralMinter.address;
+  const collateralMinterAddress = "0x0764b6C1D56A9A8eD82d737797Fd6910469ff5A0";
 
   // Get CollateralMinter contract
   const CollateralMinter = await ethers.getContractFactory("CollateralMinter");
