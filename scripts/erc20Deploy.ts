@@ -13,8 +13,8 @@ async function main() {
     // Configuration for different tokens
     const Tokens = [
         {
-            name: "TEST STAR TOKEN",
-            symbol: "TSTARK", 
+            name: "Cambodian Premier League Token",
+            symbol: "CPLSTAR", 
             decimals: 18,
             initialSupply: ethers.parseUnits("0", 18)
         },
